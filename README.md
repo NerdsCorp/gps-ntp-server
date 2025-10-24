@@ -41,8 +41,13 @@ A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS wi
 - Root/sudo access for NTP server on port 123
 
 ## Installation
+### Easy install script
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/install.sh)
+```
 
-### Quick Install
+
+### Long Install
 
 1. **Clone or download the files:**
 ```bash
