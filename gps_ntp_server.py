@@ -20,6 +20,14 @@ import sys
 import os
 import argparse
 
+# Import NTP statistics module if available
+try:
+    from ntp_statistics import ntp_stats_bp, init_ntp_monitor
+    NTP_STATS_AVAILABLE = True
+except ImportError:
+    NTP_STATS_AVAILABLE = False
+    logger.warning("NTP statistics module not available")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +38,11 @@ logger = logging.getLogger(__name__)
 # Flask app
 app = Flask(__name__)
 CORS(app)
+
+# Register NTP statistics blueprint if available
+if NTP_STATS_AVAILABLE:
+    app.register_blueprint(ntp_stats_bp)
+    logger.info("NTP statistics module registered")
 
 # Global GPS data storage
 gps_data = {
@@ -523,6 +536,12 @@ HTML_TEMPLATE = '''
     <div class="container">
         <h1>🛰️ GPS NTP Server Dashboard</h1>
         
+        <div style="text-align: center; margin-bottom: 20px;">
+            <a href="/stats" style="background: white; color: #667eea; padding: 10px 20px; border-radius: 5px; text-decoration: none; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                📊 View NTP Statistics & Server Comparison
+            </a>
+        </div>
+        
         <div id="status-alert" class="alert alert-warning">
             <span class="status-indicator status-waiting"></span>
             Waiting for GPS signal...
@@ -870,6 +889,15 @@ def main():
         logger.info("Starting NTP server...")
         ntp_server = NTPServer(port=args.ntp_port)
         ntp_server.start()
+        
+        # Initialize NTP monitoring if available
+        if NTP_STATS_AVAILABLE:
+            logger.info("Initializing NTP monitoring...")
+            # Add local GPS server to monitoring
+            custom_servers = [
+                {'address': '127.0.0.1', 'port': args.ntp_port, 'name': 'Local GPS (This Server)'}
+            ]
+            init_ntp_monitor(custom_servers)
     
     # Start web server
     logger.info(f"Starting web server on port {args.web_port}...")
