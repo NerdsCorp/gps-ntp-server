@@ -46,6 +46,16 @@ A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS wi
 curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/install.sh | sudo bash
 
 ```
+### Easy uninstall script
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/uninstall.sh | sudo bash
+
+```
+### Easy update script
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/update.sh | sudo bash
+
+```
 
 
 ### Long Install
