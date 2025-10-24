@@ -5,6 +5,18 @@
 
 set -e
 
+# --- System update & dependencies ---
+echo "📦 Installing system dependencies Please Wait..."
+
+# --- Clone or update repo ---
+if [ ! -d "gps-ntp-server" ]; then
+  git clone https://github.com/NerdsCorp/gps-ntp-server.git
+  cd gps-ntp-server
+else
+  cd gps-ntp-server
+  git pull
+fi
+
 echo "================================"
 echo "GPS NTP Server Installation"
 echo "================================"
