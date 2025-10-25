@@ -677,11 +677,6 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
 @ntp_stats_bp.route('/')
 def index():
     """Redirect to stats page"""
-    return redirect(url_for('ntp_stats.stats_page'))
-
-@ntp_stats_bp.route('/stats')
-def stats_page():
-    """Serve NTP statistics page"""
     return render_template_string(STATS_HTML_TEMPLATE)
 
 @ntp_stats_bp.route('/api/ntp/stats')
