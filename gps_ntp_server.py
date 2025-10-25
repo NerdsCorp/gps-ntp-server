@@ -476,7 +476,7 @@ def index():
     if 'server' in globals():
         status = server.get_status()
         return Response(
-            f"Adafruit Ultimate GPS NTP Server\n"
+            f"GPS NTP Server\n"
             f"=====================================\n"
             f"Firmware: {status['firmware']}\n"
             f"Running: {status['running']}\n"
@@ -492,12 +492,12 @@ def index():
             f"\nAccess /stats for detailed statistics dashboard",
             mimetype='text/plain'
         )
-    return Response("Adafruit GPS NTP Server\nAccess /stats for statistics", mimetype='text/plain')
+    return Response("GPS NTP Server\nAccess /stats for statistics", mimetype='text/plain')
 
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Adafruit Ultimate GPS NTP Server')
+    parser = argparse.ArgumentParser(description='GPS NTP Server')
     parser.add_argument('--serial', default='/dev/ttyUSB0', 
                        help='GPS serial port (default: /dev/ttyUSB0)')
     parser.add_argument('--baudrate', type=int, default=9600,
