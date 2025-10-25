@@ -643,6 +643,14 @@ STATS_HTML_TEMPLATE = '''
             margin-top: 20px;
             font-size: 14px;
         }
+        .error-message {
+            color: #dc3545;
+            text-align: center;
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -658,6 +666,8 @@ STATS_HTML_TEMPLATE = '''
             <input type="number" id="newPort" placeholder="Port" value="123" style="width: 80px;">
             <span style="margin-left: 20px; color: #666;">Auto-refresh: <span id="countdown">30</span>s</span>
         </div>
+        
+        <div id="error-message" class="error-message" style="display: none;"></div>
         
         <div class="summary-cards">
             <div class="summary-card">
@@ -728,7 +738,7 @@ STATS_HTML_TEMPLATE = '''
                 <canvas id="jitterChart"></canvas>
             </div>
             <div class="chart-container">
-                <h3>✅ Availability (%)</h3>
+                <h3>✅ Historical RTT</h3>
                 <canvas id="historicalChart"></canvas>
             </div>
         </div>
@@ -853,7 +863,8 @@ STATS_HTML_TEMPLATE = '''
                     },
                     plugins: {
                         legend: {
-                            display: false
+                            display: true,
+                            position: 'top'
                         }
                     }
                 }
@@ -878,13 +889,30 @@ STATS_HTML_TEMPLATE = '''
             return 'metric-bad';
         }
         
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        function clearError() {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = '';
+            errorDiv.style.display = 'none';
+        }
+        
         function updateStats() {
+            console.log('Fetching NTP stats from /stats/api/ntp/stats');
             fetch('/stats/api/ntp/stats')
                 .then(response => {
-                    if (!response.ok) throw new Error('Failed to fetch NTP stats');
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
                     return response.json();
                 })
                 .then(data => {
+                    console.log('Received data:', data);
+                    clearError();
                     document.getElementById('total-servers').textContent = data.total_servers || 0;
                     document.getElementById('servers-online').textContent = data.servers_online || 0;
                     document.getElementById('best-latency').textContent = formatNumber(data.best_latency);
@@ -905,6 +933,7 @@ STATS_HTML_TEMPLATE = '''
                 })
                 .catch(error => {
                     console.error('Error fetching stats:', error);
+                    showError(`Failed to fetch NTP statistics: ${error.message}`);
                     document.getElementById('comparison-tbody').innerHTML = 
                         '<tr><td colspan="13" style="text-align: center; color: #999;">Error fetching data</td></tr>';
                 });
@@ -969,34 +998,40 @@ STATS_HTML_TEMPLATE = '''
         }
         
         function updateCharts(data) {
-            if (!data.servers) return;
+            if (!data || !data.servers) {
+                console.warn('No valid server data for chart update');
+                return;
+            }
             
             const servers = data.servers.filter(s => s.reachable);
             
+            // Update Latency Chart
             charts.latency.data.labels = servers.map(s => s.name);
-            charts.latency.data.datasets[0].data = servers.map(s => s.current_rtt);
+            charts.latency.data.datasets[0].data = servers.map(s => s.current_rtt || 0);
             charts.latency.update();
             
+            // Update Offset Chart
             charts.offset.data.labels = servers.map(s => s.name);
-            charts.offset.data.datasets[0].data = servers.map(s => s.current_offset);
+            charts.offset.data.datasets[0].data = servers.map(s => s.current_offset || 0);
             charts.offset.data.datasets[0].backgroundColor = servers.map(s => {
-                const absOffset = Math.abs(s.current_offset);
+                const absOffset = Math.abs(s.current_offset || 0);
                 if (absOffset < 10) return 'rgba(40, 167, 69, 0.8)';
                 if (absOffset < 50) return 'rgba(255, 193, 7, 0.8)';
                 return 'rgba(220, 53, 69, 0.8)';
             });
             charts.offset.data.datasets[0].borderColor = servers.map(s => {
-                const absOffset = Math.abs(s.current_offset);
+                const absOffset = Math.abs(s.current_offset || 0);
                 if (absOffset < 10) return 'rgba(40, 167, 69, 1)';
                 if (absOffset < 50) return 'rgba(255, 193, 7, 1)';
                 return 'rgba(220, 53, 69, 1)';
             });
             charts.offset.update();
             
+            // Update Jitter Chart
             charts.jitter.data.labels = servers.map(s => s.name);
             charts.jitter.data.datasets = servers.map((s, i) => ({
                 label: s.name,
-                data: s.jitter ? [s.jitter] : [],
+                data: s.jitter ? [s.jitter] : [0],
                 borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
                 backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
                 borderWidth: 2,
@@ -1006,10 +1041,13 @@ STATS_HTML_TEMPLATE = '''
             }));
             charts.jitter.update();
             
-            charts.historical.data.labels = data.servers.map(s => s.name);
+            // Update Historical Chart
             charts.historical.data.datasets = data.servers.map((s, i) => ({
                 label: s.name,
-                data: data.history && data.history[s.server] ? data.history[s.server].points.map(p => ({x: new Date(p.timestamp), y: p.rtt})) : [],
+                data: data.history && data.history[s.server] ? data.history[s.server].points.map(p => ({
+                    x: new Date(p.timestamp),
+                    y: p.rtt || 0
+                })) : [],
                 borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
                 backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
                 borderWidth: 2,
@@ -1030,34 +1068,40 @@ STATS_HTML_TEMPLATE = '''
             const port = document.getElementById('newPort').value || 123;
             
             if (!server) {
-                alert('Please enter a server address');
+                showError('Please enter a server address');
                 return;
             }
             
+            console.log('Adding server:', server, 'Port:', port);
             fetch('/stats/api/ntp/add-server', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({server: server, port: parseInt(port)})
             })
             .then(response => {
-                if (!response.ok) throw new Error('Failed to add server');
+                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
                 return response.json();
             })
             .then(data => {
                 if (data.success) {
+                    console.log('Server added successfully');
                     document.getElementById('newServer').value = '';
                     refreshStats();
                 } else {
-                    alert('Failed to add server: ' + (data.error || 'Unknown error'));
+                    showError('Failed to add server: ' + (data.error || 'Unknown error'));
                 }
             })
-            .catch(error => alert('Error adding server: ' + error));
+            .catch(error => {
+                console.error('Error adding server:', error);
+                showError('Error adding server: ' + error.message);
+            });
         }
         
         function exportData() {
+            console.log('Exporting data as CSV');
             fetch('/stats/api/ntp/export')
                 .then(response => {
-                    if (!response.ok) throw new Error('Failed to export data');
+                    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
                     return response.blob();
                 })
                 .then(blob => {
@@ -1070,7 +1114,10 @@ STATS_HTML_TEMPLATE = '''
                     a.remove();
                     window.URL.revokeObjectURL(url);
                 })
-                .catch(error => alert('Error exporting data: ' + error));
+                .catch(error => {
+                    console.error('Error exporting data:', error);
+                    showError('Error exporting data: ' + error.message);
+                });
         }
         
         function updateCountdown() {
