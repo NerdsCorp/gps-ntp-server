@@ -781,23 +781,52 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
+        logger.info("=" * 60)
+        logger.info("Starting GPS NTP Server components...")
+        logger.info("=" * 60)
+
         server.start()
-        logger.info(f"Web interface starting on port {args.web_port}")
-        logger.info(f"View status at: http://localhost:{args.web_port}/")
-        logger.info(f"Statistics at: http://localhost:{args.web_port}/stats/")
-        app.run(host='0.0.0.0', port=args.web_port, debug=False)
+        logger.info("✅ GPS and NTP threads started successfully")
+
+        logger.info("-" * 60)
+        logger.info(f"🌐 Starting web interface on port {args.web_port}...")
+        logger.info(f"   View status at: http://localhost:{args.web_port}/")
+        logger.info(f"   Statistics at: http://localhost:{args.web_port}/stats/")
+        logger.info(f"   Flask app registered routes: {len(app.url_map._rules)} routes")
+        logger.info("-" * 60)
+
+        # Check if port is available
+        import socket as sock_test
+        test_sock = sock_test.socket(sock_test.AF_INET, sock_test.SOCK_STREAM)
+        try:
+            test_sock.bind(('0.0.0.0', args.web_port))
+            test_sock.close()
+            logger.info(f"✅ Port {args.web_port} is available")
+        except OSError as e:
+            logger.error(f"❌ Port {args.web_port} is already in use or unavailable: {e}")
+            raise
+
+        logger.info("🚀 Calling app.run() - web server should start now...")
+
+        # Start Flask web server (blocking call)
+        app.run(host='0.0.0.0', port=args.web_port, debug=False, use_reloader=False)
+
+        # This line should never be reached unless app.run() exits
+        logger.warning("Flask app.run() returned unexpectedly")
+
     except KeyboardInterrupt:
-        logger.info("\nShutting down...")
-        server.stop()
-        sys.exit(0)
+        logger.info("\n🛑 Received KeyboardInterrupt, shutting down...")
     except Exception as e:
-        logger.error(f"Server error: {e}")
-        server.stop()
-        sys.exit(1)
+        logger.error(f"❌ Server error: {e}")
+        logger.error(f"   Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"   Traceback:\n{traceback.format_exc()}")
     finally:
-        # Ensure clean shutdown
+        # Clean shutdown
+        logger.info("Cleaning up...")
         try:
             server.stop()
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
+        logger.info("Shutdown complete")
         sys.exit(0)
