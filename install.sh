@@ -2,24 +2,35 @@
 
 # GPS NTP Server Installation Script
 # For Adafruit Ultimate GPS GNSS
+# Run this script from within the gps-ntp-server repository directory
 
 set -e
-
-# --- System update & dependencies ---
-echo "📦 Installing system dependencies Please Wait..."
-
-# --- Clone or update repo ---
-if [ ! -d "gps-ntp-server" ]; then
-  git clone https://github.com/NerdsCorp/gps-ntp-server.git
-  cd gps-ntp-server
-else
-  cd gps-ntp-server
-  git pull
-fi
 
 echo "================================"
 echo "GPS NTP Server Installation"
 echo "================================"
+echo ""
+
+# Check if we're in the right directory
+if [ ! -f "gps_ntp_server.py" ] || [ ! -f "requirements.txt" ]; then
+    echo "❌ Error: This script must be run from the gps-ntp-server repository directory"
+    echo ""
+    echo "Please run:"
+    echo "  git clone https://github.com/NerdsCorp/gps-ntp-server.git"
+    echo "  cd gps-ntp-server"
+    echo "  sudo ./install.sh"
+    exit 1
+fi
+
+# Check for required commands
+echo "Checking prerequisites..."
+for cmd in git python3; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "❌ Error: $cmd is not installed. Please install it first."
+        exit 1
+    fi
+done
+echo "✓ Prerequisites met"
 echo ""
 
 # Check if running as root for systemd service
@@ -47,17 +58,30 @@ echo ""
 echo "Installing system dependencies..."
 if command -v apt-get &> /dev/null; then
     if [ "$EUID" -eq 0 ]; then
-        apt-get update
+        echo "Updating package lists..."
+        apt-get update -qq
+        echo "Installing Python packages (python3-pip, python3-venv)..."
         apt-get install -y python3-pip python3-venv
+        echo "✓ System dependencies installed"
     else
-        echo "Please run: sudo apt-get install python3-pip python3-venv"
+        echo "⚠️  Not running as root. Please install dependencies manually:"
+        echo "  sudo apt-get update"
+        echo "  sudo apt-get install -y python3-pip python3-venv"
+        exit 1
     fi
 elif command -v yum &> /dev/null; then
     if [ "$EUID" -eq 0 ]; then
+        echo "Installing Python packages (python3-pip)..."
         yum install -y python3-pip
+        echo "✓ System dependencies installed"
     else
-        echo "Please run: sudo yum install python3-pip"
+        echo "⚠️  Not running as root. Please install dependencies manually:"
+        echo "  sudo yum install -y python3-pip"
+        exit 1
     fi
+else
+    echo "⚠️  Could not detect package manager (apt-get or yum)"
+    echo "Please install python3-pip and python3-venv manually"
 fi
 
 # Create installation directory

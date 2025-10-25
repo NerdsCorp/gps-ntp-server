@@ -41,58 +41,86 @@ A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS wi
 - Root/sudo access for NTP server on port 123
 
 ## Installation
-### Easy install script
-```bash
-curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/install.sh | sudo bash
 
-```
-### Easy uninstall script
-```bash
-curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/uninstall.sh | sudo bash
+### Quick Install (Recommended)
 
-```
-### Easy update script
+1. **Clone the repository:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/update.sh | sudo bash
-
+git clone https://github.com/NerdsCorp/gps-ntp-server.git
+cd gps-ntp-server
 ```
 
-
-### Long Install
-
-1. **Clone or download the files:**
+2. **Run the installation script:**
 ```bash
-mkdir /opt/gps-ntp-server
-cd /opt/gps-ntp-server
-# Copy the files here
+sudo ./install.sh
 ```
 
-2. **Install Python dependencies:**
-```bash
-pip3 install -r requirements.txt
-```
+The script will:
+- Check for required dependencies
+- Install Python packages in a virtual environment
+- Create a systemd service (if run as root)
+- Configure the GPS serial port permissions
 
 3. **Connect your GPS device:**
 - Plug in the Adafruit Ultimate GPS via USB
-- The software will auto-detect it, or you can specify the port
+- The software will auto-detect it at `/dev/ttyUSB0` or `/dev/ttyACM0`
+
+### Update Existing Installation
+
+```bash
+cd gps-ntp-server
+git pull
+sudo ./update.sh
+```
+
+### Uninstall
+
+```bash
+cd gps-ntp-server
+sudo ./uninstall.sh
+```
 
 ### Manual Installation
 
-1. **Install system dependencies:**
+If you prefer to install manually without the script:
+
+1. **Clone the repository:**
 ```bash
-sudo apt-get update
-sudo apt-get install python3 python3-pip python3-venv
+git clone https://github.com/NerdsCorp/gps-ntp-server.git
+cd gps-ntp-server
 ```
 
-2. **Create virtual environment (optional but recommended):**
+2. **Install system dependencies:**
+```bash
+sudo apt-get update
+sudo apt-get install python3 python3-pip python3-venv git
+```
+
+3. **Create virtual environment:**
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-3. **Install Python packages:**
+4. **Install Python packages:**
 ```bash
-pip install flask flask-cors pyserial pynmea2 python-dateutil
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+5. **Add your user to the dialout group (for serial port access):**
+```bash
+sudo usermod -a -G dialout $USER
+```
+Then logout and login again for the group change to take effect.
+
+6. **Run the server:**
+```bash
+# For NTP on port 123 (requires root)
+sudo ./venv/bin/python3 gps_ntp_server.py
+
+# Or for testing on higher ports (no root needed)
+./venv/bin/python3 gps_ntp_server.py --ntp-port 8123 --web-port 8080
 ```
 
 ## Usage

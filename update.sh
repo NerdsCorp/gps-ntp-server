@@ -43,15 +43,37 @@ fi
 if [ -d .git ]; then
     echo ""
     echo "📡 Pulling latest version from GitHub..."
-    git fetch origin main
-    git reset --hard origin/main
+
+    # Detect the default/main branch
+    DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+    if [ -z "$DEFAULT_BRANCH" ]; then
+        # Fallback: try main, then master
+        if git ls-remote --heads origin main | grep -q main; then
+            DEFAULT_BRANCH="main"
+        elif git ls-remote --heads origin master | grep -q master; then
+            DEFAULT_BRANCH="master"
+        else
+            echo "⚠️  Cannot detect default branch. Using current branch."
+            DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        fi
+    fi
+
+    echo "Using branch: $DEFAULT_BRANCH"
+
+    # Check for uncommitted changes
+    if ! git diff-index --quiet HEAD --; then
+        echo "⚠️  WARNING: You have uncommitted local changes!"
+        echo "These will be lost if you continue. Press Ctrl+C to cancel."
+        read -p "Press Enter to continue and discard local changes..."
+    fi
+
+    git fetch origin "$DEFAULT_BRANCH"
+    git reset --hard "origin/$DEFAULT_BRANCH"
 else
-    echo "Repository not found — re-cloning..."
-    cd /tmp
-    git clone https://github.com/NerdsCorp/gps-ntp-server.git
-    cp -r gps-ntp-server/* "$INSTALL_DIR/"
-    rm -rf gps-ntp-server
-    cd "$INSTALL_DIR"
+    echo "❌ Not a git repository."
+    echo "Please clone from GitHub:"
+    echo "  git clone https://github.com/NerdsCorp/gps-ntp-server.git"
+    exit 1
 fi
 
 # Update Python environment
