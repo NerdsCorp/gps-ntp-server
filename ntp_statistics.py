@@ -58,12 +58,12 @@ class NTPClient:
             recv_timestamp_frac = unpacked[12]
             recv_timestamp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
             trans_timestamp_int = unpacked[13]
-            trans_timestamp_frac = unpacked[14]
+            trans_timestamp_frac = unloaded[14]
             trans_timestamp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
             
-            # Fixed: Correct NTP offset calculation
+            # Fixed: Corrected NTP offset calculation with proper parenthesis
             NTP_EPOCH = datetime(1900, 1, 1, tzinfo=timezone.utc)
-            offset = ((recv_timestamp - (origin_timestamp_int + (origin_timestamp_frac / 2**32)) +
+            offset = ((recv_timestamp - (origin_timestamp_int + (origin_timestamp_frac / 2**32))) +
                       (trans_timestamp - (receive_time + (datetime(1970, 1, 1, tzinfo=timezone.utc) - NTP_EPOCH).total_seconds()))) / 2
             
             if stratum == 0 or stratum == 1:
@@ -137,7 +137,7 @@ class NTPMonitor:
             'offset_buffer': deque(maxlen=60),
             'quality_score': 0
         })
-        self.lock = threading.Lock()  # Added: Thread lock for shared data
+        self.lock = threading.Lock()
         
     def add_server(self, server, port=123, name=None):
         """Add an NTP server to monitor"""
@@ -162,7 +162,7 @@ class NTPMonitor:
         results = {}
         
         with self.lock:
-            servers = self.servers.copy()  # Copy to avoid modification during iteration
+            servers = self.servers.copy()
         
         for server_config in servers:
             if not server_config['enabled']:
@@ -245,7 +245,7 @@ class NTPMonitor:
                     offset_penalty = min(20, offset_std / 5)
                     score -= offset_penalty
             except statistics.StatisticsError:
-                pass  # Skip if insufficient data for stdev
+                pass
         
         metrics['quality_score'] = max(0, score)
         return metrics['quality_score']
@@ -278,7 +278,7 @@ class NTPMonitor:
                         self.aggregated_stats['offset_std'] = statistics.stdev(offsets)
                         self.aggregated_stats['offset_spread'] = max(offsets) - min(offsets)
                 except statistics.StatisticsError:
-                    self.aggregated_stats = {}  # Reset if stats calculation fails
+                    self.aggregated_stats = {}
             else:
                 self.aggregated_stats = {}
     
@@ -1040,11 +1040,10 @@ STATS_HTML_TEMPLATE = '''
             const legendHtml = [];
             let colorIndex = 0;
             
-            // Generate time labels for the last hour
             const now = new Date();
             const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
             const labels = [];
-            for (let i = 0; i <= 60; i += 5) {  // 5-minute intervals
+            for (let i = 0; i <= 60; i += 5) {
                 const time = new Date(oneHourAgo.getTime() + i * 60 * 1000);
                 labels.push(time);
             }
@@ -1180,9 +1179,9 @@ def api_ntp_stats():
         'history': {}
     }
     
-    for server_config in ntp_monitor.servers[:5]:  # Limit to first 5 servers for performance
+    for server_config in ntp_monitor.servers[:5]:
         server = server_config['address']
-        history = ntp_monitor.get_server_history(server, 3600)  # Last hour
+        history = ntp_monitor.get_server_history(server, 3600)
         if history:
             step = max(1, len(history) // 20)
             sampled = history[::step]
@@ -1217,7 +1216,6 @@ def api_add_server():
     if not server:
         return jsonify({'error': 'Server address required'}), 400
     
-    # Validate port
     if not (0 < port <= 65535):
         return jsonify({'error': 'Port must be between 1 and 65535'}), 400
     
