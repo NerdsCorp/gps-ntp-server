@@ -11,6 +11,9 @@ import threading
 import serial
 import pynmea2
 import logging
+import signal
+import sys
+import os
 from datetime import datetime, timezone, timedelta
 from flask import Flask, Response
 from flask_cors import CORS
@@ -52,7 +55,7 @@ class AdafruitGPSNTP:
     # Request firmware version
     PMTK_Q_RELEASE = b'$PMTK605*31\r\n'
     
-    def __init__(self, serial_port='/dev/ttyUSB0', baudrate=9600, ntp_port=1123):
+    def __init__(self, serial_port='/dev/ttyUSB0', baudrate=9600, ntp_port=123):
         self.serial_port = serial_port
         self.baudrate = baudrate
         self.ntp_port = ntp_port
@@ -65,7 +68,9 @@ class AdafruitGPSNTP:
         self.gps_fix_quality = 0
         self.satellites = 0
         self.firmware_version = "Unknown"
-        
+        self.gps_thread = None
+        self.ntp_thread = None
+
         # Statistics
         self.stats = {
             'nmea_total': 0,
@@ -131,15 +136,28 @@ class AdafruitGPSNTP:
         while self.running:
             try:
                 if not self.serial or not self.serial.is_open:
+                    # Check if device exists before trying to open
+                    if not os.path.exists(self.serial_port):
+                        logger.error(f"GPS device {self.serial_port} not found. Please check connection.")
+                        time.sleep(5)
+                        continue
+
                     logger.info(f"Opening Adafruit GPS on {self.serial_port} at {self.baudrate} baud...")
-                    self.serial = serial.Serial(self.serial_port, self.baudrate, timeout=1)
-                    logger.info("✅ Serial port opened")
-                    
-                    # Configure the GPS module
-                    if not self.configure_gps():
-                        logger.warning("GPS configuration failed, continuing anyway...")
-                    
-                    retry_count = 0  # Reset retry count on successful connection
+                    try:
+                        self.serial = serial.Serial(self.serial_port, self.baudrate, timeout=1)
+                        logger.info("✅ Serial port opened")
+
+                        # Configure the GPS module
+                        if not self.configure_gps():
+                            logger.warning("GPS configuration failed, continuing anyway...")
+
+                        retry_count = 0  # Reset retry count on successful connection
+                    except Exception as e:
+                        # Ensure serial port is closed if configuration fails
+                        if self.serial and self.serial.is_open:
+                            self.serial.close()
+                            self.serial = None
+                        raise  # Re-raise the exception to be caught by outer handler
                 
                 line = self.serial.readline().decode('ascii', errors='ignore').strip()
                 if not line:
@@ -418,17 +436,17 @@ class AdafruitGPSNTP:
         logger.info("Starting Adafruit Ultimate GPS NTP Server...")
         logger.info(f"  GPS Port: {self.serial_port} @ {self.baudrate} baud")
         logger.info(f"  NTP Port: {self.ntp_port}")
-        
+
         # Start GPS reader thread
-        gps_thread = threading.Thread(target=self.read_gps, daemon=True)
-        gps_thread.start()
-        
+        self.gps_thread = threading.Thread(target=self.read_gps, daemon=True)
+        self.gps_thread.start()
+
         # Give GPS a moment to initialize
         time.sleep(2)
-        
+
         # Start NTP server thread
-        ntp_thread = threading.Thread(target=self.ntp_server, daemon=True)
-        ntp_thread.start()
+        self.ntp_thread = threading.Thread(target=self.ntp_server, daemon=True)
+        self.ntp_thread.start()
         
         # Initialize NTP monitor if available
         if init_ntp_monitor:
@@ -446,14 +464,24 @@ class AdafruitGPSNTP:
         """Stop GPS and NTP services"""
         logger.info("Stopping server...")
         self.running = False
-        
-        time.sleep(2)
-        
+
+        # Wait for threads to finish
+        if self.gps_thread and self.gps_thread.is_alive():
+            logger.debug("Waiting for GPS thread to finish...")
+            self.gps_thread.join(timeout=5)
+
+        if self.ntp_thread and self.ntp_thread.is_alive():
+            logger.debug("Waiting for NTP thread to finish...")
+            self.ntp_thread.join(timeout=5)
+
+        # Close resources
         if self.serial and self.serial.is_open:
             self.serial.close()
+            logger.debug("Serial port closed")
         if self.ntp_socket:
             self.ntp_socket.close()
-            
+            logger.debug("NTP socket closed")
+
         logger.info("Server stopped")
     
     def get_status(self):
@@ -502,20 +530,31 @@ if __name__ == '__main__':
                        help='GPS serial port (default: /dev/ttyUSB0)')
     parser.add_argument('--baudrate', type=int, default=9600,
                        help='GPS baud rate (default: 9600 for Adafruit)')
-    parser.add_argument('--ntp-port', type=int, default=1123,
-                       help='NTP server port (default: 1123)')
+    parser.add_argument('--ntp-port', type=int, default=123,
+                       help='NTP server port (default: 123, requires sudo)')
     parser.add_argument('--web-port', type=int, default=5000,
                        help='Web interface port (default: 5000)')
     
     args = parser.parse_args()
-    
+
     # Create and start server
     server = AdafruitGPSNTP(
         serial_port=args.serial,
         baudrate=args.baudrate,
         ntp_port=args.ntp_port
     )
-    
+
+    # Set up signal handlers for graceful shutdown
+    def signal_handler(signum, frame):
+        """Handle shutdown signals gracefully"""
+        signal_name = 'SIGTERM' if signum == signal.SIGTERM else 'SIGINT'
+        logger.info(f"\nReceived {signal_name}, shutting down gracefully...")
+        server.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
         server.start()
         logger.info(f"Web interface starting on port {args.web_port}")

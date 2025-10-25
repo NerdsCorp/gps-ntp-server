@@ -46,108 +46,107 @@ class NTPClient:
         
     def query_server(self, server, port=123):
         """Query an NTP server and return statistics"""
-        sock = None
         try:
-            # Create UDP socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(self.timeout)
-            
-            # Create NTP request packet (48 bytes)
-            packet = bytearray(48)
-            packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
-            
-            # Record transmit time
-            transmit_time = time.time()
-            
-            # Send request
-            sock.sendto(packet, (server, port))
-            
-            # Receive response
-            data, address = sock.recvfrom(1024)
-            receive_time = time.time()
-            
-            # Calculate round-trip time
-            rtt = (receive_time - transmit_time) * 1000  # Convert to ms
-            
-            # Check packet size
-            if len(data) < 48:
-                raise ValueError(f"Invalid NTP response size: {len(data)}")
-            
-            # Unpack NTP response
-            unpacked = struct.unpack('!B B B b 11I', data[:48])
-            
-            li_vn_mode = unpacked[0]
-            stratum = unpacked[1]
-            poll = unpacked[2]
-            precision = unpacked[3]
-            root_delay = unpacked[4] / 65536.0
-            root_dispersion = unpacked[5] / 65536.0
-            ref_id = unpacked[6]
-            
-            # Extract timestamps
-            ref_timestamp_int = unpacked[7]
-            ref_timestamp_frac = unpacked[8]
-            ref_timestamp = ref_timestamp_int + (ref_timestamp_frac / 2**32)
-            
-            origin_timestamp_int = unpacked[9]
-            origin_timestamp_frac = unpacked[10]
-            
-            recv_timestamp_int = unpacked[11]
-            recv_timestamp_frac = unpacked[12]
-            
-            trans_timestamp_int = unpacked[13]
-            trans_timestamp_frac = unpacked[14]
-            
-            # Convert to full timestamps
-            origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
-            recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
-            trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
-            
-            # Calculate clock offset using NTP algorithm
-            # T1 = origin (client transmit)
-            # T2 = recv (server receive) 
-            # T3 = trans (server transmit)
-            # T4 = receive_time (client receive)
-            
-            # Convert Unix timestamps to NTP for calculation
-            ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
-            unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-            ntp_unix_offset = (unix_epoch - ntp_epoch).total_seconds()
-            
-            transmit_ntp = transmit_time + ntp_unix_offset
-            receive_ntp = receive_time + ntp_unix_offset
-            
-            # Calculate offset: ((T2 - T1) + (T3 - T4)) / 2
-            offset = ((recv_ntp - transmit_ntp) + (trans_ntp - receive_ntp)) / 2
-            
-            # Parse reference ID based on stratum
-            if stratum == 0 or stratum == 1:
-                # Stratum 0/1: Reference ID is ASCII string
-                ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
-            else:
-                # Stratum 2+: Reference ID is IP address
-                ref_id_str = socket.inet_ntoa(struct.pack('!I', ref_id))
-            
-            return {
-                'server': server,
-                'port': port,
-                'reachable': True,
-                'stratum': stratum,
-                'precision': 2 ** precision,
-                'root_delay': root_delay * 1000,  # Convert to ms
-                'root_dispersion': root_dispersion * 1000,  # Convert to ms
-                'reference_id': ref_id_str,
-                'reference_time': ref_timestamp,
-                'offset': offset * 1000,  # Convert to ms
-                'rtt': rtt,
-                'latency': rtt / 2,
-                'poll_interval': 2 ** poll,
-                'li': (li_vn_mode >> 6) & 0x3,
-                'version': (li_vn_mode >> 3) & 0x7,
-                'mode': li_vn_mode & 0x7,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            
+            # Create UDP socket with proper resource management
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(self.timeout)
+
+                # Create NTP request packet (48 bytes)
+                packet = bytearray(48)
+                packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
+
+                # Record transmit time
+                transmit_time = time.time()
+
+                # Send request
+                sock.sendto(packet, (server, port))
+
+                # Receive response
+                data, address = sock.recvfrom(1024)
+                receive_time = time.time()
+
+                # Calculate round-trip time
+                rtt = (receive_time - transmit_time) * 1000  # Convert to ms
+
+                # Check packet size
+                if len(data) < 48:
+                    raise ValueError(f"Invalid NTP response size: {len(data)}")
+
+                # Unpack NTP response
+                unpacked = struct.unpack('!B B B b 11I', data[:48])
+
+                li_vn_mode = unpacked[0]
+                stratum = unpacked[1]
+                poll = unpacked[2]
+                precision = unpacked[3]
+                root_delay = unpacked[4] / 65536.0
+                root_dispersion = unpacked[5] / 65536.0
+                ref_id = unpacked[6]
+
+                # Extract timestamps
+                ref_timestamp_int = unpacked[7]
+                ref_timestamp_frac = unpacked[8]
+                ref_timestamp = ref_timestamp_int + (ref_timestamp_frac / 2**32)
+
+                origin_timestamp_int = unpacked[9]
+                origin_timestamp_frac = unpacked[10]
+
+                recv_timestamp_int = unpacked[11]
+                recv_timestamp_frac = unpacked[12]
+
+                trans_timestamp_int = unpacked[13]
+                trans_timestamp_frac = unpacked[14]
+
+                # Convert to full timestamps
+                origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
+                recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
+                trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
+
+                # Calculate clock offset using NTP algorithm
+                # T1 = origin (client transmit)
+                # T2 = recv (server receive)
+                # T3 = trans (server transmit)
+                # T4 = receive_time (client receive)
+
+                # Convert Unix timestamps to NTP for calculation
+                ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+                unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                ntp_unix_offset = (unix_epoch - ntp_epoch).total_seconds()
+
+                transmit_ntp = transmit_time + ntp_unix_offset
+                receive_ntp = receive_time + ntp_unix_offset
+
+                # Calculate offset: ((T2 - T1) + (T3 - T4)) / 2
+                offset = ((recv_ntp - transmit_ntp) + (trans_ntp - receive_ntp)) / 2
+
+                # Parse reference ID based on stratum
+                if stratum == 0 or stratum == 1:
+                    # Stratum 0/1: Reference ID is ASCII string
+                    ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
+                else:
+                    # Stratum 2+: Reference ID is IP address
+                    ref_id_str = socket.inet_ntoa(struct.pack('!I', ref_id))
+
+                return {
+                    'server': server,
+                    'port': port,
+                    'reachable': True,
+                    'stratum': stratum,
+                    'precision': 2 ** precision,
+                    'root_delay': root_delay * 1000,  # Convert to ms
+                    'root_dispersion': root_dispersion * 1000,  # Convert to ms
+                    'reference_id': ref_id_str,
+                    'reference_time': ref_timestamp,
+                    'offset': offset * 1000,  # Convert to ms
+                    'rtt': rtt,
+                    'latency': rtt / 2,
+                    'poll_interval': 2 ** poll,
+                    'li': (li_vn_mode >> 6) & 0x3,
+                    'version': (li_vn_mode >> 3) & 0x7,
+                    'mode': li_vn_mode & 0x7,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+
         except socket.timeout:
             return {
                 'server': server,
@@ -173,9 +172,6 @@ class NTPClient:
                 'error': str(e),
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
-        finally:
-            if sock:
-                sock.close()
 
 class NTPMonitor:
     """Monitor multiple NTP servers and collect statistics"""
@@ -322,8 +318,8 @@ class NTPMonitor:
         score += min(40, metrics['availability'] * 0.4)
         
         # Average RTT (30 points) - lower is better
-        if metrics['min_rtt'] != float('inf'):
-            avg_rtt = metrics['total_offset'] / metrics['successful_queries'] if metrics['successful_queries'] > 0 else float('inf')
+        if metrics['min_rtt'] != float('inf') and len(metrics['jitter_buffer']) > 0:
+            avg_rtt = sum(metrics['jitter_buffer']) / len(metrics['jitter_buffer'])
             if avg_rtt < 10:
                 score += 30
             elif avg_rtt < 50:

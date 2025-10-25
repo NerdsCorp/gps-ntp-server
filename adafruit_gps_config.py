@@ -166,7 +166,7 @@ class AdafruitGPSConfig:
                                 sats = int(parts[7])
                                 if sats > satellites:
                                     satellites = sats
-                            except:
+                            except (ValueError, IndexError):
                                 pass
                     elif '$GPGSV' in line or '$GNGSV' in line:
                         msg_count['GSV'] += 1
