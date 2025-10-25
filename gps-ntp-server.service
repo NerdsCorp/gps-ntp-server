@@ -7,7 +7,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/gps-ntp-server
 # Use the virtual environment Python to ensure dependencies are available
-ExecStart=/opt/gps-ntp-server/venv/bin/python3 /opt/gps-ntp-server/gps_ntp_server.py --gps-port /dev/ttyUSB0 --gps-baud 9600 --web-port 5000 --ntp-port 123
+ExecStart=/opt/gps-ntp-server/venv/bin/python3 /opt/gps-ntp-server/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123
 Restart=always
 RestartSec=10
 
