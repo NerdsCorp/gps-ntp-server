@@ -563,7 +563,16 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=args.web_port, debug=False)
     except KeyboardInterrupt:
         logger.info("\nShutting down...")
+        server.stop()
+        sys.exit(0)
     except Exception as e:
         logger.error(f"Server error: {e}")
-    finally:
         server.stop()
+        sys.exit(1)
+    finally:
+        # Ensure clean shutdown
+        try:
+            server.stop()
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        sys.exit(0)
