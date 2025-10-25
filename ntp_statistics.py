@@ -11,6 +11,8 @@ import threading
 import json
 import statistics
 import logging
+import sqlite3
+import os
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 import numpy as np
@@ -22,6 +24,224 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class NTPDatabase:
+    """SQLite database for NTP statistics with 1-week retention"""
+
+    def __init__(self, db_path='ntp_stats.db'):
+        """Initialize database and create schema"""
+        self.db_path = db_path
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.Lock()
+        self._init_schema()
+        logger.info(f"NTP Database initialized at {db_path}")
+
+    def _init_schema(self):
+        """Create database schema"""
+        with self.lock:
+            cursor = self.conn.cursor()
+
+            # Servers table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS servers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    address TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    name TEXT,
+                    enabled INTEGER DEFAULT 1,
+                    UNIQUE(address, port)
+                )
+            ''')
+
+            # History table for time-series data
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    timestamp REAL NOT NULL,
+                    reachable INTEGER NOT NULL,
+                    stratum INTEGER,
+                    rtt REAL,
+                    offset REAL,
+                    precision REAL,
+                    reference_id TEXT,
+                    data_json TEXT,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Create index on timestamp for fast queries
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_history_timestamp
+                ON history(timestamp)
+            ''')
+
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_history_server_timestamp
+                ON history(server_id, timestamp)
+            ''')
+
+            # Metrics table for aggregated statistics
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS metrics (
+                    server_id INTEGER PRIMARY KEY,
+                    min_rtt REAL,
+                    max_rtt REAL,
+                    total_queries INTEGER DEFAULT 0,
+                    successful_queries INTEGER DEFAULT 0,
+                    failed_queries INTEGER DEFAULT 0,
+                    total_offset REAL DEFAULT 0,
+                    offset_squares REAL DEFAULT 0,
+                    last_success TEXT,
+                    last_failure TEXT,
+                    availability REAL DEFAULT 100.0,
+                    quality_score REAL DEFAULT 0,
+                    FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
+                )
+            ''')
+
+            self.conn.commit()
+
+    def add_server(self, address, port=123, name=None):
+        """Add or update a server"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO servers (address, port, name)
+                VALUES (?, ?, ?)
+            ''', (address, port, name or address))
+
+            if cursor.lastrowid == 0:
+                # Server already exists, update name if provided
+                cursor.execute('''
+                    UPDATE servers SET name = ?
+                    WHERE address = ? AND port = ?
+                ''', (name or address, address, port))
+
+            self.conn.commit()
+            return self.get_server_id(address, port)
+
+    def get_server_id(self, address, port=123):
+        """Get server ID by address and port"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT id FROM servers WHERE address = ? AND port = ?
+            ''', (address, port))
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def get_all_servers(self):
+        """Get all servers"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT * FROM servers WHERE enabled = 1')
+            return [dict(row) for row in cursor.fetchall()]
+
+    def remove_server(self, address):
+        """Remove a server (cascades to history and metrics)"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('DELETE FROM servers WHERE address = ?', (address,))
+            self.conn.commit()
+
+    def add_history(self, server_id, result):
+        """Add a history record"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT INTO history
+                (server_id, timestamp, reachable, stratum, rtt, offset, precision, reference_id, data_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                server_id,
+                time.time(),
+                1 if result.get('reachable') else 0,
+                result.get('stratum'),
+                result.get('rtt'),
+                result.get('offset'),
+                result.get('precision'),
+                result.get('reference_id'),
+                json.dumps(result)
+            ))
+            self.conn.commit()
+
+    def get_history(self, server_id, limit=None, since=None):
+        """Get history for a server"""
+        with self.lock:
+            cursor = self.conn.cursor()
+
+            if since:
+                query = '''
+                    SELECT * FROM history
+                    WHERE server_id = ? AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                '''
+                params = (server_id, since)
+            else:
+                query = '''
+                    SELECT * FROM history
+                    WHERE server_id = ?
+                    ORDER BY timestamp DESC
+                '''
+                params = (server_id,)
+
+            if limit:
+                query += f' LIMIT {limit}'
+
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_metrics(self, server_id, metrics):
+        """Update or insert metrics for a server"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO metrics
+                (server_id, min_rtt, max_rtt, total_queries, successful_queries,
+                 failed_queries, total_offset, offset_squares, last_success,
+                 last_failure, availability, quality_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                server_id,
+                metrics.get('min_rtt', float('inf')),
+                metrics.get('max_rtt', 0),
+                metrics.get('total_queries', 0),
+                metrics.get('successful_queries', 0),
+                metrics.get('failed_queries', 0),
+                metrics.get('total_offset', 0),
+                metrics.get('offset_squares', 0),
+                metrics.get('last_success'),
+                metrics.get('last_failure'),
+                metrics.get('availability', 100.0),
+                metrics.get('quality_score', 0)
+            ))
+            self.conn.commit()
+
+    def get_metrics(self, server_id):
+        """Get metrics for a server"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT * FROM metrics WHERE server_id = ?', (server_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def cleanup_old_data(self, days=7):
+        """Remove data older than specified days"""
+        cutoff = time.time() - (days * 86400)
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('DELETE FROM history WHERE timestamp < ?', (cutoff,))
+            deleted = cursor.rowcount
+            self.conn.commit()
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} old history records (older than {days} days)")
+
+    def close(self):
+        """Close database connection"""
+        with self.lock:
+            self.conn.close()
 
 # Create Flask blueprint
 ntp_stats_bp = Blueprint('ntp_stats', __name__)
@@ -175,16 +395,39 @@ class NTPClient:
 
 class NTPMonitor:
     """Monitor multiple NTP servers and collect statistics"""
-    
-    def __init__(self, servers=None, history_size=3600):
+
+    def __init__(self, servers=None, history_size=3600, db_path='ntp_stats.db'):
         self.servers = servers or []
         self.history_size = history_size
         self.client = NTPClient()
         self.running = False
         self.thread = None
         self.current_stats = {}
-        self.history = defaultdict(lambda: deque(maxlen=history_size))
         self.aggregated_stats = {}
+        self.lock = threading.Lock()
+
+        # Initialize database
+        self.db = NTPDatabase(db_path)
+
+        # Load servers from database if no servers provided
+        if not self.servers:
+            db_servers = self.db.get_all_servers()
+            self.servers = [{
+                'address': s['address'],
+                'port': s['port'],
+                'name': s['name'],
+                'enabled': bool(s['enabled'])
+            } for s in db_servers]
+        else:
+            # Add provided servers to database
+            for server_config in self.servers:
+                self.db.add_server(
+                    server_config['address'],
+                    server_config.get('port', 123),
+                    server_config.get('name')
+                )
+
+        # In-memory cache for quick access (still needed for jitter/offset buffers)
         self.metrics = defaultdict(lambda: {
             'min_rtt': float('inf'),
             'max_rtt': 0,
@@ -200,8 +443,44 @@ class NTPMonitor:
             'offset_buffer': deque(maxlen=60),
             'quality_score': 0
         })
-        self.lock = threading.Lock()
-        
+
+        # Load metrics from database
+        self._load_metrics_from_db()
+
+        # Schedule cleanup thread
+        self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+
+    def _load_metrics_from_db(self):
+        """Load metrics from database into memory"""
+        for server_config in self.servers:
+            server_id = self.db.get_server_id(server_config['address'], server_config.get('port', 123))
+            if server_id:
+                db_metrics = self.db.get_metrics(server_id)
+                if db_metrics:
+                    server = server_config['address']
+                    self.metrics[server].update({
+                        'min_rtt': db_metrics.get('min_rtt', float('inf')),
+                        'max_rtt': db_metrics.get('max_rtt', 0),
+                        'total_queries': db_metrics.get('total_queries', 0),
+                        'successful_queries': db_metrics.get('successful_queries', 0),
+                        'failed_queries': db_metrics.get('failed_queries', 0),
+                        'total_offset': db_metrics.get('total_offset', 0),
+                        'offset_squares': db_metrics.get('offset_squares', 0),
+                        'last_success': db_metrics.get('last_success'),
+                        'last_failure': db_metrics.get('last_failure'),
+                        'availability': db_metrics.get('availability', 100.0),
+                        'quality_score': db_metrics.get('quality_score', 0)
+                    })
+
+    def _cleanup_loop(self):
+        """Periodic cleanup of old data"""
+        while self.running:
+            time.sleep(3600)  # Run every hour
+            try:
+                self.db.cleanup_old_data(days=7)
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
+
     def add_server(self, server, port=123, name=None):
         """Add an NTP server to monitor"""
         server_config = {
@@ -217,49 +496,55 @@ class NTPMonitor:
                     logger.info(f"Server {server}:{port} already exists")
                     return
             self.servers.append(server_config)
+            # Add to database
+            self.db.add_server(server, port, name)
             logger.info(f"Added NTP server: {server}:{port} ({name})")
     
     def remove_server(self, server):
         """Remove an NTP server from monitoring"""
         with self.lock:
             self.servers = [s for s in self.servers if s['address'] != server]
-            # Also remove history and metrics
-            if server in self.history:
-                del self.history[server]
+            # Remove from database (cascades to history and metrics)
+            self.db.remove_server(server)
+            # Also remove from in-memory metrics
             if server in self.metrics:
                 del self.metrics[server]
     
     def query_all_servers(self):
         """Query all configured NTP servers"""
         results = {}
-        
+
         with self.lock:
             servers = self.servers.copy()
-        
+
         for server_config in servers:
             if not server_config.get('enabled', True):
                 continue
-                
+
             server = server_config['address']
             port = server_config.get('port', 123)
             name = server_config.get('name', server)
-            
+
             result = self.client.query_server(server, port)
             result['name'] = name
-            
+
             with self.lock:
                 self.update_metrics(server, result)
                 results[server] = result
-                self.history[server].append({
-                    'timestamp': time.time(),
-                    'data': result
-                })
+
+                # Save to database
+                server_id = self.db.get_server_id(server, port)
+                if server_id:
+                    self.db.add_history(server_id, result)
+                    # Update metrics in database
+                    self.db.update_metrics(server_id, self.metrics[server])
+
                 self.current_stats = results
-                
+
         # Calculate aggregated statistics
         with self.lock:
             self.calculate_aggregated_stats()
-        
+
         return results
     
     def update_metrics(self, server, result):
@@ -420,13 +705,19 @@ class NTPMonitor:
         return comparison
     
     def get_server_history(self, server, duration=3600):
-        """Get historical data for a server"""
-        with self.lock:
-            if server in self.history:
-                history_list = list(self.history[server])
-                cutoff = time.time() - duration
-                return [h for h in history_list if h['timestamp'] >= cutoff]
-        return []
+        """Get historical data for a server from database"""
+        server_id = self.db.get_server_id(server)
+        if not server_id:
+            return []
+
+        cutoff = time.time() - duration
+        history_records = self.db.get_history(server_id, since=cutoff)
+
+        # Convert database records to the expected format
+        return [{
+            'timestamp': record['timestamp'],
+            'data': json.loads(record['data_json']) if record['data_json'] else {}
+        } for record in history_records]
     
     def monitor_loop(self):
         """Main monitoring loop"""
@@ -446,6 +737,7 @@ class NTPMonitor:
             self.running = True
             self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
             self.thread.start()
+            self.cleanup_thread.start()
             logger.info("NTP Monitor started")
     
     def stop(self):
@@ -463,6 +755,8 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NTP Statistics Monitor</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -673,6 +967,9 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
 
         <div class="chart-container">
             <canvas id="rttChart"></canvas>
+            <p style="text-align: center; color: #666; margin-top: 10px; font-size: 12px;">
+                💡 Tip: Scroll to zoom, Ctrl+Drag to pan
+            </p>
         </div>
 
         <div class="server-table">
@@ -705,13 +1002,59 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
                 scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            displayFormats: {
+                                minute: 'HH:mm',
+                                hour: 'MMM d HH:mm'
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Time'
+                        }
+                    },
                     y: {
                         beginAtZero: true,
                         title: {
                             display: true,
                             text: 'RTT (ms)'
                         }
+                    }
+                },
+                plugins: {
+                    zoom: {
+                        pan: {
+                            enabled: true,
+                            mode: 'x',
+                            modifierKey: 'ctrl'
+                        },
+                        zoom: {
+                            wheel: {
+                                enabled: true,
+                                speed: 0.1
+                            },
+                            pinch: {
+                                enabled: true
+                            },
+                            mode: 'x'
+                        },
+                        limits: {
+                            x: {min: 'original', max: 'original'}
+                        }
+                    },
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    },
+                    tooltip: {
+                        enabled: true
                     }
                 }
             }
