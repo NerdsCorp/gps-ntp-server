@@ -6,7 +6,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/gps-ntp-server
-ExecStart=/usr/bin/python3 /opt/gps-ntp-server/gps_ntp_server.py --gps-port /dev/ttyUSB0 --gps-baud 9600 --web-port 5000 --ntp-port 123
+# Use the virtual environment Python to ensure dependencies are available
+ExecStart=/opt/gps-ntp-server/venv/bin/python3 /opt/gps-ntp-server/gps_ntp_server.py
 Restart=always
 RestartSec=10
 
@@ -14,12 +15,12 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Security hardening (comment out if issues arise)
-PrivateTmp=yes
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/gps-ntp-server
+# Security hardening (optional - uncomment if needed, but may cause issues with device access)
+#PrivateTmp=yes
+#NoNewPrivileges=true
+#ProtectSystem=strict
+#ProtectHome=true
+#ReadWritePaths=/opt/gps-ntp-server
 
 [Install]
 WantedBy=multi-user.target
