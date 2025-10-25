@@ -42,7 +42,25 @@ A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS wi
 
 ## Installation
 
-### Quick Install (Recommended)
+### One-Line Install (Quick & Easy)
+
+Install directly with a single command:
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/install.sh | sudo bash
+```
+
+Or for a specific branch:
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/claude/fix-install-script-011CUUQSLmp7GptvAymLjJYM/install.sh | sudo bash
+```
+
+This will:
+- Clone the repository to `/opt/gps-ntp-server`
+- Install all dependencies in a virtual environment
+- Create and enable a systemd service
+- Configure GPS serial port permissions
+
+### Manual Install (Recommended for Development)
 
 1. **Clone the repository:**
 ```bash
@@ -55,18 +73,17 @@ cd gps-ntp-server
 sudo ./install.sh
 ```
 
-The script will:
-- Check for required dependencies
-- Install Python packages in a virtual environment
-- Create a systemd service (if run as root)
-- Configure the GPS serial port permissions
-
 3. **Connect your GPS device:**
 - Plug in the Adafruit Ultimate GPS via USB
 - The software will auto-detect it at `/dev/ttyUSB0` or `/dev/ttyACM0`
 
 ### Update Existing Installation
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/update.sh | sudo bash
+```
+
+Or if installed manually:
 ```bash
 cd gps-ntp-server
 git pull
@@ -75,6 +92,11 @@ sudo ./update.sh
 
 ### Uninstall
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdsCorp/gps-ntp-server/main/uninstall.sh | sudo bash
+```
+
+Or if installed manually:
 ```bash
 cd gps-ntp-server
 sudo ./uninstall.sh
