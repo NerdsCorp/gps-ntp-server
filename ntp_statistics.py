@@ -46,108 +46,107 @@ class NTPClient:
         
     def query_server(self, server, port=123):
         """Query an NTP server and return statistics"""
-        sock = None
         try:
-            # Create UDP socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(self.timeout)
-            
-            # Create NTP request packet (48 bytes)
-            packet = bytearray(48)
-            packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
-            
-            # Record transmit time
-            transmit_time = time.time()
-            
-            # Send request
-            sock.sendto(packet, (server, port))
-            
-            # Receive response
-            data, address = sock.recvfrom(1024)
-            receive_time = time.time()
-            
-            # Calculate round-trip time
-            rtt = (receive_time - transmit_time) * 1000  # Convert to ms
-            
-            # Check packet size
-            if len(data) < 48:
-                raise ValueError(f"Invalid NTP response size: {len(data)}")
-            
-            # Unpack NTP response
-            unpacked = struct.unpack('!B B B b 11I', data[:48])
-            
-            li_vn_mode = unpacked[0]
-            stratum = unpacked[1]
-            poll = unpacked[2]
-            precision = unpacked[3]
-            root_delay = unpacked[4] / 65536.0
-            root_dispersion = unpacked[5] / 65536.0
-            ref_id = unpacked[6]
-            
-            # Extract timestamps
-            ref_timestamp_int = unpacked[7]
-            ref_timestamp_frac = unpacked[8]
-            ref_timestamp = ref_timestamp_int + (ref_timestamp_frac / 2**32)
-            
-            origin_timestamp_int = unpacked[9]
-            origin_timestamp_frac = unpacked[10]
-            
-            recv_timestamp_int = unpacked[11]
-            recv_timestamp_frac = unpacked[12]
-            
-            trans_timestamp_int = unpacked[13]
-            trans_timestamp_frac = unpacked[14]
-            
-            # Convert to full timestamps
-            origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
-            recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
-            trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
-            
-            # Calculate clock offset using NTP algorithm
-            # T1 = origin (client transmit)
-            # T2 = recv (server receive) 
-            # T3 = trans (server transmit)
-            # T4 = receive_time (client receive)
-            
-            # Convert Unix timestamps to NTP for calculation
-            ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
-            unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-            ntp_unix_offset = (unix_epoch - ntp_epoch).total_seconds()
-            
-            transmit_ntp = transmit_time + ntp_unix_offset
-            receive_ntp = receive_time + ntp_unix_offset
-            
-            # Calculate offset: ((T2 - T1) + (T3 - T4)) / 2
-            offset = ((recv_ntp - transmit_ntp) + (trans_ntp - receive_ntp)) / 2
-            
-            # Parse reference ID based on stratum
-            if stratum == 0 or stratum == 1:
-                # Stratum 0/1: Reference ID is ASCII string
-                ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
-            else:
-                # Stratum 2+: Reference ID is IP address
-                ref_id_str = socket.inet_ntoa(struct.pack('!I', ref_id))
-            
-            return {
-                'server': server,
-                'port': port,
-                'reachable': True,
-                'stratum': stratum,
-                'precision': 2 ** precision,
-                'root_delay': root_delay * 1000,  # Convert to ms
-                'root_dispersion': root_dispersion * 1000,  # Convert to ms
-                'reference_id': ref_id_str,
-                'reference_time': ref_timestamp,
-                'offset': offset * 1000,  # Convert to ms
-                'rtt': rtt,
-                'latency': rtt / 2,
-                'poll_interval': 2 ** poll,
-                'li': (li_vn_mode >> 6) & 0x3,
-                'version': (li_vn_mode >> 3) & 0x7,
-                'mode': li_vn_mode & 0x7,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            
+            # Create UDP socket with proper resource management
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(self.timeout)
+
+                # Create NTP request packet (48 bytes)
+                packet = bytearray(48)
+                packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
+
+                # Record transmit time
+                transmit_time = time.time()
+
+                # Send request
+                sock.sendto(packet, (server, port))
+
+                # Receive response
+                data, address = sock.recvfrom(1024)
+                receive_time = time.time()
+
+                # Calculate round-trip time
+                rtt = (receive_time - transmit_time) * 1000  # Convert to ms
+
+                # Check packet size
+                if len(data) < 48:
+                    raise ValueError(f"Invalid NTP response size: {len(data)}")
+
+                # Unpack NTP response
+                unpacked = struct.unpack('!B B B b 11I', data[:48])
+
+                li_vn_mode = unpacked[0]
+                stratum = unpacked[1]
+                poll = unpacked[2]
+                precision = unpacked[3]
+                root_delay = unpacked[4] / 65536.0
+                root_dispersion = unpacked[5] / 65536.0
+                ref_id = unpacked[6]
+
+                # Extract timestamps
+                ref_timestamp_int = unpacked[7]
+                ref_timestamp_frac = unpacked[8]
+                ref_timestamp = ref_timestamp_int + (ref_timestamp_frac / 2**32)
+
+                origin_timestamp_int = unpacked[9]
+                origin_timestamp_frac = unpacked[10]
+
+                recv_timestamp_int = unpacked[11]
+                recv_timestamp_frac = unpacked[12]
+
+                trans_timestamp_int = unpacked[13]
+                trans_timestamp_frac = unpacked[14]
+
+                # Convert to full timestamps
+                origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
+                recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
+                trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
+
+                # Calculate clock offset using NTP algorithm
+                # T1 = origin (client transmit)
+                # T2 = recv (server receive)
+                # T3 = trans (server transmit)
+                # T4 = receive_time (client receive)
+
+                # Convert Unix timestamps to NTP for calculation
+                ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+                unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                ntp_unix_offset = (unix_epoch - ntp_epoch).total_seconds()
+
+                transmit_ntp = transmit_time + ntp_unix_offset
+                receive_ntp = receive_time + ntp_unix_offset
+
+                # Calculate offset: ((T2 - T1) + (T3 - T4)) / 2
+                offset = ((recv_ntp - transmit_ntp) + (trans_ntp - receive_ntp)) / 2
+
+                # Parse reference ID based on stratum
+                if stratum == 0 or stratum == 1:
+                    # Stratum 0/1: Reference ID is ASCII string
+                    ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
+                else:
+                    # Stratum 2+: Reference ID is IP address
+                    ref_id_str = socket.inet_ntoa(struct.pack('!I', ref_id))
+
+                return {
+                    'server': server,
+                    'port': port,
+                    'reachable': True,
+                    'stratum': stratum,
+                    'precision': 2 ** precision,
+                    'root_delay': root_delay * 1000,  # Convert to ms
+                    'root_dispersion': root_dispersion * 1000,  # Convert to ms
+                    'reference_id': ref_id_str,
+                    'reference_time': ref_timestamp,
+                    'offset': offset * 1000,  # Convert to ms
+                    'rtt': rtt,
+                    'latency': rtt / 2,
+                    'poll_interval': 2 ** poll,
+                    'li': (li_vn_mode >> 6) & 0x3,
+                    'version': (li_vn_mode >> 3) & 0x7,
+                    'mode': li_vn_mode & 0x7,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+
         except socket.timeout:
             return {
                 'server': server,
@@ -173,9 +172,6 @@ class NTPClient:
                 'error': str(e),
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
-        finally:
-            if sock:
-                sock.close()
 
 class NTPMonitor:
     """Monitor multiple NTP servers and collect statistics"""
@@ -322,8 +318,8 @@ class NTPMonitor:
         score += min(40, metrics['availability'] * 0.4)
         
         # Average RTT (30 points) - lower is better
-        if metrics['min_rtt'] != float('inf'):
-            avg_rtt = metrics['total_offset'] / metrics['successful_queries'] if metrics['successful_queries'] > 0 else float('inf')
+        if metrics['min_rtt'] != float('inf') and len(metrics['jitter_buffer']) > 0:
+            avg_rtt = sum(metrics['jitter_buffer']) / len(metrics['jitter_buffer'])
             if avg_rtt < 10:
                 score += 30
             elif avg_rtt < 50:
@@ -459,7 +455,7 @@ class NTPMonitor:
             self.thread.join(timeout=5)
         logger.info("NTP Monitor stopped")
 
-# HTML template for the statistics page (truncated for space)
+# HTML template for the statistics page
 STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -468,33 +464,86 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
     <title>NTP Statistics Monitor</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-            margin: 0; 
-            padding: 20px; 
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
         }
-        .container { 
-            max-width: 1400px; 
-            margin: 0 auto; 
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
         }
         .header {
             text-align: center;
             color: white;
             margin-bottom: 30px;
         }
-        .stats-grid { 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
-            gap: 20px; 
-            margin-bottom: 30px; 
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
         }
         .stat-card {
             background: white;
             padding: 20px;
             border-radius: 10px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        .add-server-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+        .add-server-form {
+            display: grid;
+            grid-template-columns: 2fr 1fr 2fr 1fr;
+            gap: 10px;
+            align-items: end;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        .form-group label {
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+            font-size: 14px;
+        }
+        .form-group input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+        .btn-danger:hover {
+            background: #c82333;
         }
         .server-table {
             width: 100%;
@@ -542,38 +591,90 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
             height: 300px;
             position: relative;
         }
+        .time-precision {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+        .time-ns {
+            color: #666;
+            font-size: 11px;
+        }
+        .alert {
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            display: none;
+        }
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        @media (max-width: 768px) {
+            .add-server-form {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🕐 NTP Statistics Monitor</h1>
-            <p>Real-time monitoring of NTP servers</p>
+            <p>Real-time monitoring of NTP servers with nanosecond precision</p>
         </div>
-        
+
+        <div id="alert-message" class="alert"></div>
+
+        <div class="add-server-card">
+            <h3 style="margin-top: 0;">Add NTP Server</h3>
+            <div class="add-server-form">
+                <div class="form-group">
+                    <label for="server-address">Server Address</label>
+                    <input type="text" id="server-address" placeholder="time.google.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="server-port">Port</label>
+                    <input type="number" id="server-port" placeholder="123" value="123" min="1" max="65535">
+                </div>
+                <div class="form-group">
+                    <label for="server-name">Display Name</label>
+                    <input type="text" id="server-name" placeholder="Google NTP">
+                </div>
+                <div class="form-group">
+                    <button class="btn btn-primary" onclick="addServer()">Add Server</button>
+                </div>
+            </div>
+        </div>
+
         <div class="stats-grid">
             <div class="stat-card">
                 <h3>Servers Online</h3>
-                <p id="servers-online">--</p>
+                <p id="servers-online" style="font-size: 2em; margin: 10px 0; color: #667eea;">--</p>
             </div>
             <div class="stat-card">
                 <h3>Best Latency</h3>
-                <p id="best-latency">--</p>
+                <p id="best-latency" style="font-size: 2em; margin: 10px 0; color: #667eea;">--</p>
             </div>
             <div class="stat-card">
                 <h3>Average Offset</h3>
-                <p id="avg-offset">--</p>
+                <p id="avg-offset" style="font-size: 2em; margin: 10px 0; color: #667eea;">--</p>
             </div>
             <div class="stat-card">
                 <h3>Best Server</h3>
-                <p id="best-server">--</p>
+                <p id="best-server" style="font-size: 1.5em; margin: 10px 0; color: #667eea;">--</p>
             </div>
         </div>
-        
+
         <div class="chart-container">
             <canvas id="rttChart"></canvas>
         </div>
-        
+
         <div class="server-table">
             <table>
                 <thead>
@@ -581,9 +682,10 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
                         <th>Server</th>
                         <th>Status</th>
                         <th>Stratum</th>
-                        <th>RTT (ms)</th>
-                        <th>Offset (ms)</th>
+                        <th>RTT (µs / ns)</th>
+                        <th>Offset (µs / ns)</th>
                         <th>Quality</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="server-list">
@@ -614,38 +716,126 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
                 }
             }
         });
-        
+
+        function formatTimePrecision(milliseconds) {
+            if (!milliseconds) return '--';
+            const microseconds = (milliseconds * 1000).toFixed(2);
+            const nanoseconds = (milliseconds * 1000000).toFixed(0);
+            return `<div class="time-precision">${microseconds} µs<br><span class="time-ns">${nanoseconds} ns</span></div>`;
+        }
+
+        function showAlert(message, type = 'success') {
+            const alert = document.getElementById('alert-message');
+            alert.textContent = message;
+            alert.className = 'alert alert-' + type;
+            alert.style.display = 'block';
+            setTimeout(() => {
+                alert.style.display = 'none';
+            }, 5000);
+        }
+
+        function addServer() {
+            const address = document.getElementById('server-address').value.trim();
+            const port = parseInt(document.getElementById('server-port').value);
+            const name = document.getElementById('server-name').value.trim() || address;
+
+            if (!address) {
+                showAlert('Please enter a server address', 'error');
+                return;
+            }
+
+            fetch('/stats/api/ntp/add-server', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    server: address,
+                    port: port,
+                    name: name
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert(data.message || 'Server added successfully', 'success');
+                    document.getElementById('server-address').value = '';
+                    document.getElementById('server-port').value = '123';
+                    document.getElementById('server-name').value = '';
+                    updateStats();
+                } else {
+                    showAlert(data.error || 'Failed to add server', 'error');
+                }
+            })
+            .catch(error => {
+                showAlert('Error: ' + error.message, 'error');
+            });
+        }
+
+        function removeServer(serverAddress, serverName) {
+            if (!confirm(`Are you sure you want to remove ${serverName}?`)) {
+                return;
+            }
+
+            fetch('/stats/api/ntp/remove-server', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    server: serverAddress
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert(data.message || 'Server removed successfully', 'success');
+                    updateStats();
+                } else {
+                    showAlert(data.error || 'Failed to remove server', 'error');
+                }
+            })
+            .catch(error => {
+                showAlert('Error: ' + error.message, 'error');
+            });
+        }
+
         function updateStats() {
             fetch('/stats/api/ntp/stats')
                 .then(response => response.json())
                 .then(data => {
                     // Update summary stats
                     document.getElementById('servers-online').textContent = data.servers_online || 0;
-                    document.getElementById('best-latency').textContent = 
-                        data.best_latency ? data.best_latency.toFixed(2) + ' ms' : '--';
-                    document.getElementById('avg-offset').textContent = 
-                        data.avg_offset ? data.avg_offset.toFixed(2) + ' ms' : '--';
+                    document.getElementById('best-latency').innerHTML =
+                        data.best_latency ? formatTimePrecision(data.best_latency) : '--';
+                    document.getElementById('avg-offset').innerHTML =
+                        data.avg_offset ? formatTimePrecision(Math.abs(data.avg_offset)) : '--';
                     document.getElementById('best-server').textContent = data.best_server_name || '--';
-                    
+
                     // Update server table
                     const tbody = document.getElementById('server-list');
                     tbody.innerHTML = '';
-                    
+
                     if (data.servers) {
                         data.servers.forEach(server => {
                             const row = tbody.insertRow();
                             row.innerHTML = `
-                                <td>${server.name}</td>
+                                <td><strong>${server.name}</strong><br><small style="color: #666;">${server.server}</small></td>
                                 <td><span class="status-badge status-${server.reachable ? 'online' : 'offline'}">
                                     ${server.reachable ? 'Online' : 'Offline'}</span></td>
                                 <td>${server.stratum || '--'}</td>
-                                <td>${server.current_rtt ? server.current_rtt.toFixed(2) : '--'}</td>
-                                <td>${server.current_offset ? server.current_offset.toFixed(2) : '--'}</td>
+                                <td>${server.current_rtt ? formatTimePrecision(server.current_rtt) : '--'}</td>
+                                <td>${server.current_offset ? formatTimePrecision(Math.abs(server.current_offset)) : '--'}</td>
                                 <td>${server.quality_score ? server.quality_score.toFixed(1) + '%' : '--'}</td>
+                                <td>
+                                    <button class="btn btn-danger" onclick="removeServer('${server.server}', '${server.name}')">
+                                        Remove
+                                    </button>
+                                </td>
                             `;
                         });
                     }
-                    
+
                     // Update chart
                     if (data.history) {
                         const datasets = [];
@@ -666,7 +856,15 @@ STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
                     }
                 });
         }
-        
+
+        // Allow Enter key to add server
+        document.getElementById('server-address').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') addServer();
+        });
+        document.getElementById('server-name').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') addServer();
+        });
+
         // Update stats every 5 seconds
         updateStats();
         setInterval(updateStats, 5000);
@@ -724,24 +922,45 @@ def api_add_server():
     """Add a new NTP server to monitor"""
     if not ntp_monitor:
         return jsonify({'error': 'NTP monitor not initialized'}), 500
-    
+
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data provided'}), 400
-    
+
     server = data.get('server')
     port = data.get('port', 123)
     name = data.get('name', server)
-    
+
     if not server:
         return jsonify({'error': 'Server address required'}), 400
-    
+
     if not (0 < port <= 65535):
         return jsonify({'error': 'Port must be between 1 and 65535'}), 400
-    
+
     try:
         ntp_monitor.add_server(server, port, name)
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': f'Added server {name}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@ntp_stats_bp.route('/api/ntp/remove-server', methods=['POST'])
+def api_remove_server():
+    """Remove an NTP server from monitoring"""
+    if not ntp_monitor:
+        return jsonify({'error': 'NTP monitor not initialized'}), 500
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    server = data.get('server')
+
+    if not server:
+        return jsonify({'error': 'Server address required'}), 400
+
+    try:
+        ntp_monitor.remove_server(server)
+        return jsonify({'success': True, 'message': f'Removed server {server}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
