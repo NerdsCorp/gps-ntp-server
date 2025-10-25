@@ -91,12 +91,46 @@ else
     pip install -r requirements.txt
 fi
 
-# Restart systemd service if applicable
+# Update systemd service file if applicable
 if [ "$SYSTEM_MODE" = true ]; then
+    # Check if service file exists in repository
+    if [ -f "gps-ntp-server.service" ]; then
+        echo ""
+        echo "🔧 Checking systemd service file..."
+
+        # Path to installed service file
+        INSTALLED_SERVICE="/etc/systemd/system/$SERVICE_NAME.service"
+
+        if [ -f "$INSTALLED_SERVICE" ]; then
+            # Compare service files
+            if ! diff -q "gps-ntp-server.service" "$INSTALLED_SERVICE" > /dev/null 2>&1; then
+                echo "📝 Service file has changed, updating..."
+                # Update WorkingDirectory and ExecStart paths in service file
+                sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123|g" \
+                    gps-ntp-server.service > "$INSTALLED_SERVICE"
+                echo "✅ Service file updated"
+            else
+                echo "✅ Service file is up to date"
+            fi
+        else
+            echo "⚠️  Service file not found in /etc/systemd/system/"
+            echo "Installing service file..."
+            # Update WorkingDirectory and ExecStart paths in service file
+            sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123|g" \
+                gps-ntp-server.service > "$INSTALLED_SERVICE"
+            systemctl enable "$SERVICE_NAME"
+            echo "✅ Service file installed"
+        fi
+    fi
+
     echo ""
     echo "🚀 Restarting systemd service..."
     systemctl daemon-reload
-    systemctl start "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME"
+
+    # Wait a moment for service to start
+    sleep 2
+
     systemctl status "$SERVICE_NAME" --no-pager
 else
     echo ""
