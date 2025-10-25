@@ -56,15 +56,15 @@ class NTPClient:
             origin_timestamp_frac = unpacked[10]
             recv_timestamp_int = unpacked[11]
             recv_timestamp_frac = unpacked[12]
-            recv_timestamp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
             trans_timestamp_int = unpacked[13]
-            trans_timestamp_frac = unloaded[14]
+            trans_timestamp_frac = unpacked[14]
             trans_timestamp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
             
-            # Fixed: Corrected NTP offset calculation with proper parenthesis
-            NTP_EPOCH = datetime(1900, 1, 1, tzinfo=timezone.utc)
-            offset = ((recv_timestamp - (origin_timestamp_int + (origin_timestamp_frac / 2**32))) +
-                      (trans_timestamp - (receive_time + (datetime(1970, 1, 1, tzinfo=timezone.utc) - NTP_EPOCH).total_seconds()))) / 2
+            # Corrected NTP offset calculation
+            origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
+            recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
+            trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
+            offset = ((recv_ntp - origin_ntp) + (trans_ntp - receive_time)) / 2
             
             if stratum == 0 or stratum == 1:
                 ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
