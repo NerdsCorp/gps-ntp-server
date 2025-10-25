@@ -3,11 +3,14 @@
 A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS with USB** (99 channel w/10 Hz updates). This application provides:
 
 - 🛰️ Real-time GPS data monitoring via web dashboard
-- ⏰ NTP time server functionality using GPS time
+- ⏰ NTP time server functionality using GPS time (Stratum 1)
 - 📍 Live position tracking with map visualization
 - 📊 Detailed satellite and signal statistics
+- 📈 NTP statistics monitoring with nanosecond precision
+- ➕ Dynamic server management (add/remove NTP servers to monitor)
 - 🔧 Auto-detection of GPS devices
 - 🌐 RESTful API for integration
+- ⚙️ GPS configuration tools included
 
 ## Features
 
@@ -24,12 +27,24 @@ A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS wi
 - Serves accurate time to network clients
 - Client connection statistics
 - Compatible with standard NTP clients
+- Configurable port (default 123, requires sudo)
+
+### NTP Statistics Monitor
+- Real-time monitoring of multiple NTP servers
+- Nanosecond precision time measurements (µs/ns display)
+- Add/remove servers dynamically via web interface
+- Quality scoring and availability tracking
+- RTT (Round-Trip Time) and offset monitoring
+- Live charts and historical data
+- Server comparison and ranking
+- CSV export of statistics
 
 ### Web Dashboard
 - Beautiful, responsive web interface
 - Live map showing current position (OpenStreetMap)
-- Real-time data updates every second
+- Real-time data updates
 - Satellite signal strength visualization
+- NTP statistics dashboard at /stats/
 - NTP client configuration instructions
 - Mobile-friendly design
 
@@ -160,29 +175,30 @@ sudo python3 gps_ntp_server.py
 python3 gps_ntp_server.py [OPTIONS]
 
 Options:
-  --gps-port PORT     GPS serial port (default: /dev/ttyUSB0, auto-detect if not found)
-  --gps-baud RATE     GPS baud rate (default: 9600)
+  --serial PORT       GPS serial port (default: /dev/ttyUSB0)
+  --baudrate RATE     GPS baud rate (default: 9600 for Adafruit)
   --web-port PORT     Web server port (default: 5000)
-  --ntp-port PORT     NTP server port (default: 123, requires sudo for <1024)
-  --no-ntp           Disable NTP server
-  --debug            Enable debug logging
+  --ntp-port PORT     NTP server port (default: 123, requires sudo)
+  --help, -h          Show help message and exit
 ```
+
+**Note:** Port 123 is the standard NTP port and requires root/sudo access. For testing without sudo, use a higher port like 8123.
 
 ### Examples
 
-1. **Run with auto-detection (recommended):**
+1. **Run with default settings (recommended):**
 ```bash
 sudo python3 gps_ntp_server.py
 ```
 
 2. **Specify GPS port explicitly:**
 ```bash
-sudo python3 gps_ntp_server.py --gps-port /dev/ttyUSB0
+sudo python3 gps_ntp_server.py --serial /dev/ttyUSB0
 ```
 
 3. **Use higher baud rate (if configured on GPS):**
 ```bash
-sudo python3 gps_ntp_server.py --gps-baud 115200
+sudo python3 gps_ntp_server.py --baudrate 115200
 ```
 
 4. **Run NTP on non-privileged port (no sudo needed):**
@@ -190,22 +206,39 @@ sudo python3 gps_ntp_server.py --gps-baud 115200
 python3 gps_ntp_server.py --ntp-port 8123 --web-port 8080
 ```
 
-5. **Web interface only (no NTP server):**
+5. **Custom configuration:**
 ```bash
-python3 gps_ntp_server.py --no-ntp
+sudo python3 gps_ntp_server.py --serial /dev/ttyACM0 --baudrate 9600 --web-port 5000 --ntp-port 123
 ```
 
 ## Accessing the Dashboard
 
 Once running, open your browser and navigate to:
+
+**Main Dashboard (GPS Status):**
 ```
 http://localhost:5000
+```
+
+**NTP Statistics Dashboard:**
+```
+http://localhost:5000/stats/
 ```
 
 Or from another computer on the same network:
 ```
 http://[SERVER-IP]:5000
+http://[SERVER-IP]:5000/stats/
 ```
+
+### NTP Statistics Features
+The statistics dashboard allows you to:
+- Monitor your GPS NTP server and other NTP servers
+- Add new NTP servers to monitor (time.google.com, pool.ntp.org, etc.)
+- Remove servers from monitoring
+- View nanosecond precision measurements (µs/ns)
+- Compare server performance and quality
+- Export statistics to CSV
 
 ## Configuring NTP Clients
 
@@ -269,12 +302,18 @@ sudo journalctl -u gps-ntp-server -f
 
 The server provides a RESTful API for integration:
 
-- `GET /` - Web dashboard
+### Main API
+- `GET /` - Main web dashboard (GPS status)
 - `GET /api/gps` - Current GPS data (JSON)
 - `GET /api/ntp` - NTP server statistics (JSON)
 - `GET /api/server-info` - Server configuration (JSON)
-- `GET /api/config` - Get configuration
-- `POST /api/config` - Update configuration (TODO)
+
+### NTP Statistics API
+- `GET /stats/` - NTP statistics dashboard (HTML)
+- `GET /stats/api/ntp/stats` - Current NTP statistics for all monitored servers (JSON)
+- `POST /stats/api/ntp/add-server` - Add a new NTP server to monitor (JSON)
+- `POST /stats/api/ntp/remove-server` - Remove an NTP server from monitoring (JSON)
+- `GET /stats/api/ntp/export` - Export statistics as CSV
 
 ### Example API Response
 
@@ -357,11 +396,51 @@ curl http://localhost:5000/api/gps
 
 ## GPS Module Configuration
 
-The Adafruit Ultimate GPS uses the MTK3339 chipset. The server automatically configures it for optimal performance:
+The Adafruit Ultimate GPS uses the MTK3339 chipset. The server automatically configures it for optimal NTP performance:
 
-- **Update rate:** 10Hz (100ms)
-- **NMEA sentences:** RMC, GGA, GSA, GSV, VTG
+- **Update rate:** 1Hz (1000ms) - optimal for NTP time synchronization
+- **NMEA sentences:** RMC and GGA only (minimal overhead)
 - **Baud rate:** Default 9600 (can be changed)
+- **SBAS:** Enabled for better accuracy
+
+### Configuration Tool
+
+The package includes `adafruit_gps_config.py` for advanced GPS configuration:
+
+```bash
+# Interactive configuration menu
+python3 adafruit_gps_config.py
+
+# Quick NTP configuration
+python3 adafruit_gps_config.py --configure-ntp
+
+# Monitor GPS output
+python3 adafruit_gps_config.py --monitor 30
+
+# Factory reset
+python3 adafruit_gps_config.py --reset
+```
+
+### NTP Testing Tool
+
+The package includes `ntp_test_tool.py` for testing and comparing NTP servers:
+
+```bash
+# Test a single server
+python3 ntp_test_tool.py --server time.google.com
+
+# Compare multiple servers
+python3 ntp_test_tool.py --compare --server time.google.com time.cloudflare.com pool.ntp.org
+
+# Test custom port
+python3 ntp_test_tool.py --server localhost:8123
+
+# Monitor servers over time
+python3 ntp_test_tool.py --monitor --duration 300 --server time.google.com time.nist.gov
+
+# Export results to JSON
+python3 ntp_test_tool.py --server time.google.com --export results.json
+```
 
 ### Manual GPS Configuration (Optional)
 
@@ -372,7 +451,8 @@ screen /dev/ttyUSB0 9600
 
 Send PMTK commands:
 ```
-$PMTK220,100*2F    # 10Hz update rate
+$PMTK220,1000*1F   # 1Hz update rate (recommended for NTP)
+$PMTK220,100*2F    # 10Hz update rate (high precision)
 $PMTK251,115200*1F # Change baud to 115200
 ```
 
@@ -420,10 +500,28 @@ MIT License - Feel free to use and modify!
 
 ## Changelog
 
+### Version 2.0.0 (Latest)
+- **NTP Statistics Monitor**: Real-time monitoring of multiple NTP servers
+- **Nanosecond Precision**: Display time measurements in µs and ns
+- **Dynamic Server Management**: Add/remove NTP servers via web UI
+- **Quality Scoring**: Automated quality assessment for monitored servers
+- **Live Charts**: Historical RTT visualization
+- **CSV Export**: Export statistics for analysis
+- **API Enhancements**: New endpoints for server management
+- **Graceful Shutdown**: Proper signal handling for SIGTERM/SIGINT
+- **Bug Fixes**:
+  - Fixed NTP port default mismatch
+  - Fixed quality score calculation
+  - Improved error handling and resource cleanup
+  - Fixed serial port cleanup on errors
+  - Added device existence validation
+- **Configuration Tools**: Added GPS configuration and NTP testing utilities
+- **Improved Documentation**: Updated README with all new features
+
 ### Version 1.0.0
 - Initial release
 - Full GPS monitoring
-- NTP server implementation  
+- NTP server implementation
 - Web dashboard with live map
 - Auto-detection of GPS devices
 - RESTful API
@@ -431,10 +529,14 @@ MIT License - Feel free to use and modify!
 
 ## Contributing
 
-Contributions welcome! Areas for improvement:
+Contributions welcome! Future enhancement ideas:
+- ✅ ~~NTP statistics monitoring~~ (Implemented in v2.0)
+- ✅ ~~Server management UI~~ (Implemented in v2.0)
 - Authentication for web interface
-- Historical data graphing
-- RINEX data export
-- RTK/DGPS support
+- RINEX data export for scientific analysis
+- RTK/DGPS support for centimeter-level accuracy
 - WebSocket for real-time updates
 - Docker containerization
+- Prometheus metrics export
+- Email/SMS alerts for GPS/NTP failures
+- Multi-GPS redundancy support

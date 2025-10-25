@@ -134,6 +134,7 @@ if [ "$INSTALL_SERVICE" = true ]; then
         cp README.md $INSTALL_DIR/ 2>/dev/null || true
         cp ntp_statistics.py $INSTALL_DIR/ 2>/dev/null || true
         cp adafruit_gps_config.py $INSTALL_DIR/ 2>/dev/null || true
+        cp ntp_test_tool.py $INSTALL_DIR/ 2>/dev/null || true
 
         cd $INSTALL_DIR
     fi
@@ -257,6 +258,9 @@ fi
 echo ""
 echo "Access the web interface at:"
 echo "  http://localhost:5000"
+echo ""
+echo "Access the NTP statistics dashboard at:"
+echo "  http://localhost:5000/stats/"
 echo ""
 echo "For help and options:"
 echo "  python3 gps_ntp_server.py --help"
