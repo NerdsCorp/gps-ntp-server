@@ -14,9 +14,13 @@ import logging
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 import numpy as np
-from flask import Blueprint, render_template_string, jsonify, request
+from flask import Blueprint, render_template_string, jsonify, request, redirect, url_for
 
 # Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Create Flask blueprint
@@ -555,7 +559,7 @@ STATS_HTML_TEMPLATE = '''
             padding-bottom: 10px;
             border-bottom: 1px solid #dee2e6;
         }
-        #latencyChart, #offsetChart, #jitterChart, #availabilityChart {
+        #latencyChart, #offsetChart, #jitterChart, #historicalChart {
             height: 300px;
         }
         .controls {
@@ -725,14 +729,8 @@ STATS_HTML_TEMPLATE = '''
             </div>
             <div class="chart-container">
                 <h3>✅ Availability (%)</h3>
-                <canvas id="availabilityChart"></canvas>
+                <canvas id="historicalChart"></canvas>
             </div>
-        </div>
-        
-        <div class="chart-container">
-            <h3>📉 Historical Performance (Last Hour)</h3>
-            <canvas id="historicalChart"></canvas>
-            <div class="legend" id="historicalLegend"></div>
         </div>
         
         <div class="stats-footer">
@@ -822,27 +820,6 @@ STATS_HTML_TEMPLATE = '''
                 }
             });
             
-            charts.availability = new Chart(document.getElementById('availabilityChart'), {
-                type: 'doughnut',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        data: [],
-                        backgroundColor: [],
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'right'
-                        }
-                    }
-                }
-            });
-            
             charts.historical = new Chart(document.getElementById('historicalChart'), {
                 type: 'line',
                 data: {
@@ -902,7 +879,7 @@ STATS_HTML_TEMPLATE = '''
         }
         
         function updateStats() {
-            fetch('/api/ntp/stats')
+            fetch('/stats/api/ntp/stats')
                 .then(response => {
                     if (!response.ok) throw new Error('Failed to fetch NTP stats');
                     return response.json();
@@ -1016,66 +993,31 @@ STATS_HTML_TEMPLATE = '''
             });
             charts.offset.update();
             
-            charts.availability.data.labels = data.servers.map(s => s.name);
-            charts.availability.data.datasets[0].data = data.servers.map(s => s.availability);
-            charts.availability.data.datasets[0].backgroundColor = data.servers.map(s => {
-                if (s.availability >= 99) return '#28a745';
-                if (s.availability >= 95) return '#ffc107';
-                return '#dc3545';
-            });
-            charts.availability.update();
+            charts.jitter.data.labels = servers.map(s => s.name);
+            charts.jitter.data.datasets = servers.map((s, i) => ({
+                label: s.name,
+                data: s.jitter ? [s.jitter] : [],
+                borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
+                backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
+                borderWidth: 2,
+                fill: false,
+                tension: 0.1,
+                pointRadius: 0
+            }));
+            charts.jitter.update();
             
-            if (data.history) {
-                updateHistoricalChart(data.history);
-            }
-        }
-        
-        function updateHistoricalChart(history) {
-            const colors = [
-                '#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8',
-                '#6610f2', '#e83e8c', '#fd7e14', '#20c997', '#6c757d'
-            ];
-            
-            const datasets = [];
-            const legendHtml = [];
-            let colorIndex = 0;
-            
-            const now = new Date();
-            const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-            const labels = [];
-            for (let i = 0; i <= 60; i += 5) {
-                const time = new Date(oneHourAgo.getTime() + i * 60 * 1000);
-                labels.push(time);
-            }
-            
-            for (const [server, data] of Object.entries(history)) {
-                const color = colors[colorIndex % colors.length];
-                datasets.push({
-                    label: data.name,
-                    data: data.points.map(p => ({x: new Date(p.timestamp), y: p.rtt})),
-                    borderColor: color,
-                    backgroundColor: color + '20',
-                    borderWidth: 2,
-                    fill: false,
-                    tension: 0.1,
-                    pointRadius: 0
-                });
-                
-                legendHtml.push(`
-                    <div class="legend-item">
-                        <div class="legend-color" style="background: ${color}"></div>
-                        <span>${data.name}</span>
-                    </div>
-                `);
-                
-                colorIndex++;
-            }
-            
-            charts.historical.data.labels = labels;
-            charts.historical.data.datasets = datasets;
+            charts.historical.data.labels = data.servers.map(s => s.name);
+            charts.historical.data.datasets = data.servers.map((s, i) => ({
+                label: s.name,
+                data: data.history && data.history[s.server] ? data.history[s.server].points.map(p => ({x: new Date(p.timestamp), y: p.rtt})) : [],
+                borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
+                backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
+                borderWidth: 2,
+                fill: false,
+                tension: 0.1,
+                pointRadius: 0
+            }));
             charts.historical.update();
-            
-            document.getElementById('historicalLegend').innerHTML = legendHtml.join('');
         }
         
         function refreshStats() {
@@ -1092,7 +1034,7 @@ STATS_HTML_TEMPLATE = '''
                 return;
             }
             
-            fetch('/api/ntp/add-server', {
+            fetch('/stats/api/ntp/add-server', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({server: server, port: parseInt(port)})
@@ -1113,7 +1055,7 @@ STATS_HTML_TEMPLATE = '''
         }
         
         function exportData() {
-            fetch('/api/ntp/export')
+            fetch('/stats/api/ntp/export')
                 .then(response => {
                     if (!response.ok) throw new Error('Failed to export data');
                     return response.blob();
@@ -1152,6 +1094,11 @@ STATS_HTML_TEMPLATE = '''
 </body>
 </html>
 '''
+
+@ntp_stats_bp.route('/')
+def index():
+    """Redirect to stats page"""
+    return redirect(url_for('ntp_stats.stats_page'))
 
 @ntp_stats_bp.route('/stats')
 def stats_page():
