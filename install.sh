@@ -70,9 +70,12 @@ if [ "$INSTALL_SERVICE" = true ]; then
     # Copy files
     echo "Copying files..."
     cp gps_ntp_server.py $INSTALL_DIR/
+    cp ntp_statistics.py $INSTALL_DIR/
+    cp adafruit_gps_config.py $INSTALL_DIR/ 2>/dev/null || true
+    cp ntp_test_tool.py $INSTALL_DIR/ 2>/dev/null || true
     cp requirements.txt $INSTALL_DIR/
     cp README.md $INSTALL_DIR/ 2>/dev/null || true
-    
+
     cd $INSTALL_DIR
 else
     INSTALL_DIR=$(pwd)
@@ -117,7 +120,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --gps-port /dev/ttyUSB0 --gps-baud 9600 --web-port 5000 --ntp-port 123
+ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -194,6 +197,9 @@ fi
 echo ""
 echo "Access the web interface at:"
 echo "  http://localhost:5000"
+echo ""
+echo "Access the NTP statistics dashboard at:"
+echo "  http://localhost:5000/stats/"
 echo ""
 echo "For help and options:"
 echo "  python3 gps_ntp_server.py --help"
