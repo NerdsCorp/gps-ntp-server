@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import ntp_statistics
 try:
-    from ntp_statistics_fixed import ntp_stats_bp, init_ntp_monitor
+    from ntp_statistics import ntp_stats_bp, init_ntp_monitor
 except ImportError as e:
     logger.warning(f"NTP statistics module not available: {e}")
     ntp_stats_bp = None
@@ -394,7 +394,7 @@ class AdafruitGPSNTP:
         
         logger.info(f"""
 ========================================
-Adafruit Ultimate GPS Status:
+ GPS Status:
   Firmware: {self.firmware_version}
   GPS Time: {time_status}
   Fix Type: {fix_status}
