@@ -44,7 +44,8 @@ if NTP_STATS_AVAILABLE:
     app.register_blueprint(ntp_stats_bp)
     logger.info("NTP statistics module registered")
 
-# Global GPS data storage
+# Global GPS data storage with thread lock
+gps_data_lock = threading.Lock()
 gps_data = {
     'status': 'NO_FIX',
     'latitude': None,
@@ -69,7 +70,8 @@ gps_data = {
     'time_accuracy': 'Unknown'
 }
 
-# NTP server statistics
+# NTP server statistics with thread lock
+ntp_stats_lock = threading.Lock()
 ntp_stats = {
     'requests': 0,
     'last_request': None,
@@ -89,11 +91,9 @@ class GPSReader(threading.Thread):
         """Auto-detect GPS device"""
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            # Common GPS device identifiers
             if any(x in port.description.lower() for x in ['gps', 'gnss', 'adafruit', 'cp210', 'ft232', 'ch340']):
                 logger.info(f"Found potential GPS device: {port.device} - {port.description}")
                 return port.device
-            # Check for common USB-to-serial chips
             if any(x in str(port.hwid).lower() for x in ['067b:2303', '10c4:ea60', '1a86:7523']):
                 logger.info(f"Found USB-Serial device: {port.device} - {port.description}")
                 return port.device
@@ -102,7 +102,6 @@ class GPSReader(threading.Thread):
     def connect(self):
         """Connect to GPS device"""
         try:
-            # Try auto-detection first
             if not os.path.exists(self.port):
                 detected_port = self.find_gps_port()
                 if detected_port:
@@ -128,7 +127,6 @@ class GPSReader(threading.Thread):
     def configure_gps(self):
         """Send configuration commands to GPS module"""
         try:
-            # Commands for Adafruit Ultimate GPS (MTK3339 chipset)
             commands = [
                 b'$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n',  # RMC & GGA only
                 b'$PMTK220,100*2F\r\n',  # Set update rate to 10Hz (100ms)
@@ -145,83 +143,80 @@ class GPSReader(threading.Thread):
     def parse_nmea(self, sentence):
         """Parse NMEA sentence and update global GPS data"""
         global gps_data
-        
         try:
             msg = pynmea2.parse(sentence)
-            gps_data['sentences_parsed'] += 1
-            gps_data['last_update'] = datetime.now(timezone.utc).isoformat()
+            with gps_data_lock:
+                gps_data['sentences_parsed'] += 1
+                gps_data['last_update'] = datetime.now(timezone.utc).isoformat()
             
-            # RMC - Recommended Minimum Navigation Information
             if isinstance(msg, pynmea2.RMC):
-                if msg.status == 'A':  # Active (valid fix)
-                    gps_data['status'] = 'ACTIVE'
-                    gps_data['latitude'] = msg.latitude
-                    gps_data['longitude'] = msg.longitude
-                    gps_data['speed'] = msg.spd_over_grnd  # knots
-                    gps_data['course'] = msg.true_course
-                    gps_data['date'] = msg.datestamp.isoformat() if msg.datestamp else None
-                    gps_data['timestamp'] = msg.timestamp.isoformat() if msg.timestamp else None
-                else:
-                    gps_data['status'] = 'NO_FIX'
+                with gps_data_lock:
+                    if msg.status == 'A':
+                        gps_data['status'] = 'ACTIVE'
+                        gps_data['latitude'] = msg.latitude
+                        gps_data['longitude'] = msg.longitude
+                        gps_data['speed'] = msg.spd_over_grnd
+                        gps_data['course'] = msg.true_course
+                        gps_data['date'] = msg.datestamp.isoformat() if msg.datestamp else None
+                        gps_data['timestamp'] = msg.timestamp.isoformat() if msg.timestamp else None
+                    else:
+                        gps_data['status'] = 'NO_FIX'
             
-            # GGA - Fix Data
             elif isinstance(msg, pynmea2.GGA):
-                gps_data['fix_quality'] = self.get_fix_quality(msg.gps_qual)
-                gps_data['satellites'] = msg.num_sats
-                gps_data['hdop'] = msg.horizontal_dil
-                gps_data['altitude'] = msg.altitude
-                gps_data['timestamp'] = msg.timestamp.isoformat() if msg.timestamp else None
-                
-                # Update signal quality based on satellites
-                if msg.num_sats >= 8:
-                    gps_data['signal_quality'] = 'Excellent'
-                elif msg.num_sats >= 6:
-                    gps_data['signal_quality'] = 'Good'
-                elif msg.num_sats >= 4:
-                    gps_data['signal_quality'] = 'Fair'
-                else:
-                    gps_data['signal_quality'] = 'Poor'
+                with gps_data_lock:
+                    gps_data['fix_quality'] = self.get_fix_quality(msg.gps_qual)
+                    gps_data['satellites'] = msg.num_sats
+                    gps_data['hdop'] = msg.horizontal_dil
+                    gps_data['altitude'] = msg.altitude
+                    gps_data['timestamp'] = msg.timestamp.isoformat() if msg.timestamp else None
+                    if msg.num_sats >= 8:
+                        gps_data['signal_quality'] = 'Excellent'
+                    elif msg.num_sats >= 6:
+                        gps_data['signal_quality'] = 'Good'
+                    elif msg.num_sats >= 4:
+                        gps_data['signal_quality'] = 'Fair'
+                    else:
+                        gps_data['signal_quality'] = 'Poor'
             
-            # GSA - Satellite Active
             elif isinstance(msg, pynmea2.GSA):
-                gps_data['fix_type'] = self.get_fix_type(msg.mode_fix_type)
-                gps_data['pdop'] = msg.pdop
-                gps_data['hdop'] = msg.hdop
-                gps_data['vdop'] = msg.vdop
+                with gps_data_lock:
+                    gps_data['fix_type'] = self.get_fix_type(msg.mode_fix_type)
+                    gps_data['pdop'] = msg.pdop
+                    gps_data['hdop'] = msg.hdop
+                    gps_data['vdop'] = msg.vdop
             
-            # GSV - Satellites in View
             elif isinstance(msg, pynmea2.GSV):
-                if msg.msg_num == '1':  # First message in sequence
-                    gps_data['satellites_in_view'] = []
-                
-                # Add satellite info
-                for i in range(4):  # Up to 4 satellites per GSV message
-                    try:
-                        sat_num = getattr(msg, f'sv_prn_num_{i+1}')
-                        elevation = getattr(msg, f'elevation_deg_{i+1}')
-                        azimuth = getattr(msg, f'azimuth_{i+1}')
-                        snr = getattr(msg, f'snr_{i+1}')
-                        
-                        if sat_num:
-                            gps_data['satellites_in_view'].append({
-                                'prn': sat_num,
-                                'elevation': elevation,
-                                'azimuth': azimuth,
-                                'snr': snr
-                            })
-                    except AttributeError:
-                        break
+                with gps_data_lock:
+                    if msg.msg_num == '1':
+                        gps_data['satellites_in_view'] = []
+                    for i in range(4):
+                        try:
+                            sat_num = getattr(msg, f'sv_prn_num_{i+1}')
+                            elevation = getattr(msg, f'elevation_deg_{i+1}')
+                            azimuth = getattr(msg, f'azimuth_{i+1}')
+                            snr = getattr(msg, f'snr_{i+1}')
+                            if sat_num:
+                                gps_data['satellites_in_view'].append({
+                                    'prn': sat_num,
+                                    'elevation': elevation,
+                                    'azimuth': azimuth,
+                                    'snr': snr
+                                })
+                        except AttributeError:
+                            break
             
-            # VTG - Track Made Good and Ground Speed
             elif isinstance(msg, pynmea2.VTG):
-                gps_data['speed'] = msg.spd_over_grnd_kts  # knots
-                gps_data['course'] = msg.true_track
+                with gps_data_lock:
+                    gps_data['speed'] = msg.spd_over_grnd_kts
+                    gps_data['course'] = msg.true_track
                 
         except pynmea2.ParseError as e:
-            gps_data['sentences_failed'] += 1
+            with gps_data_lock:
+                gps_data['sentences_failed'] += 1
             logger.debug(f"Failed to parse NMEA: {e}")
         except Exception as e:
-            gps_data['sentences_failed'] += 1
+            with gps_data_lock:
+                gps_data['sentences_failed'] += 1
             logger.error(f"Error parsing NMEA: {e}")
     
     def get_fix_quality(self, qual):
@@ -253,8 +248,10 @@ class GPSReader(threading.Thread):
         self.running = True
         retry_count = 0
         max_retries = 5
+        total_attempts = 0
+        max_total_attempts = 20
         
-        while self.running:
+        while self.running and total_attempts < max_total_attempts:
             if not self.serial or not self.serial.is_open:
                 if retry_count < max_retries:
                     logger.info(f"Attempting to connect to GPS (attempt {retry_count + 1}/{max_retries})")
@@ -263,12 +260,14 @@ class GPSReader(threading.Thread):
                         retry_count = 0
                     else:
                         retry_count += 1
+                        total_attempts += 1
                         time.sleep(5)
                         continue
                 else:
                     logger.error("Max retries reached. Waiting 30 seconds before trying again.")
                     time.sleep(30)
                     retry_count = 0
+                    total_attempts += 1
                     continue
             
             try:
@@ -283,11 +282,16 @@ class GPSReader(threading.Thread):
                             pass
             except serial.SerialException as e:
                 logger.error(f"Serial error: {e}")
-                self.serial.close()
+                if self.serial:
+                    self.serial.close()
                 time.sleep(5)
             except Exception as e:
                 logger.error(f"Unexpected error in GPS reader: {e}")
                 time.sleep(1)
+        
+        if total_attempts >= max_total_attempts:
+            logger.error("Maximum total connection attempts reached. Exiting GPS reader.")
+            self.running = False
     
     def stop(self):
         """Stop GPS reading"""
@@ -310,7 +314,11 @@ class NTPServer(threading.Thread):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.sock.bind(('', self.port))
+            try:
+                self.sock.bind(('', self.port))
+            except PermissionError:
+                logger.error(f"Permission denied binding to port {self.port}. Run with sudo or use --ntp-port with a port > 1024 (e.g., 1234)")
+                return
             self.sock.settimeout(1.0)
             logger.info(f"NTP server started on port {self.port}")
             
@@ -326,8 +334,6 @@ class NTPServer(threading.Thread):
                     
         except Exception as e:
             logger.error(f"Failed to start NTP server: {e}")
-            if self.port < 1024:
-                logger.info("Try running with sudo for ports < 1024, or use --ntp-port with a higher port number")
         finally:
             if self.sock:
                 self.sock.close()
@@ -336,52 +342,45 @@ class NTPServer(threading.Thread):
         """Handle NTP client request"""
         global gps_data, ntp_stats
         
-        # Check if we have valid GPS time
-        if not gps_data.get('timestamp') or gps_data.get('status') != 'ACTIVE':
-            logger.warning(f"NTP request from {addr[0]} rejected - no GPS fix")
-            return
+        with gps_data_lock:
+            if not gps_data.get('timestamp') or not gps_data.get('date') or gps_data.get('status') != 'ACTIVE':
+                logger.warning(f"NTP request from {addr[0]} rejected - no valid GPS time")
+                return
         
         try:
-            # Parse NTP packet
             unpacked = struct.unpack('!B B B b 11I', data[:48])
-            
-            # Build NTP response
-            # NTP timestamp: seconds since 1900-01-01
             NTP_EPOCH = datetime(1900, 1, 1, tzinfo=timezone.utc)
             
-            # Get current GPS time
-            gps_time_str = f"{gps_data['date']}T{gps_data['timestamp']}"
-            gps_time = datetime.fromisoformat(gps_time_str).replace(tzinfo=timezone.utc)
+            with gps_data_lock:
+                gps_time_str = f"{gps_data['date']}T{gps_data['timestamp']}"
+            try:
+                gps_time = datetime.fromisoformat(gps_time_str).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error parsing GPS time: {e}")
+                return
             
-            # Calculate NTP timestamp
             ntp_timestamp = (gps_time - NTP_EPOCH).total_seconds()
             ntp_timestamp_int = int(ntp_timestamp)
             ntp_timestamp_frac = int((ntp_timestamp - ntp_timestamp_int) * 2**32)
             
-            # Build response packet
             response = struct.pack('!B B B b 11I',
-                0x1C,  # LI=0, VN=3, Mode=4 (server)
-                1,     # Stratum (primary reference)
-                3,     # Poll interval
-                -6,    # Precision
-                0,     # Root delay
-                0,     # Root dispersion
-                0x47505300,  # Reference ID ('GPS\x00')
-                ntp_timestamp_int, ntp_timestamp_frac,  # Reference timestamp
-                unpacked[7], unpacked[8],  # Origin timestamp (from request)
-                ntp_timestamp_int, ntp_timestamp_frac,  # Receive timestamp
-                ntp_timestamp_int, ntp_timestamp_frac   # Transmit timestamp
+                0x1C, 1, 3, -6, 0, 0, 0x47505300,
+                ntp_timestamp_int, ntp_timestamp_frac,
+                unpacked[7], unpacked[8],
+                ntp_timestamp_int, ntp_timestamp_frac,
+                ntp_timestamp_int, ntp_timestamp_frac
             )
             
             self.sock.sendto(response, addr)
             
-            # Update statistics
-            ntp_stats['requests'] += 1
-            ntp_stats['last_request'] = datetime.now(timezone.utc).isoformat()
-            if addr[0] not in ntp_stats['clients']:
-                ntp_stats['clients'][addr[0]] = 0
-            ntp_stats['clients'][addr[0]] += 1
-            gps_data['ntp_clients_served'] = ntp_stats['requests']
+            with ntp_stats_lock:
+                ntp_stats['requests'] += 1
+                ntp_stats['last_request'] = datetime.now(timezone.utc).isoformat()
+                if addr[0] not in ntp_stats['clients']:
+                    ntp_stats['clients'][addr[0]] = 0
+                ntp_stats['clients'][addr[0]] += 1
+                with gps_data_lock:
+                    gps_data['ntp_clients_served'] = ntp_stats['requests']
             
             logger.info(f"NTP request served to {addr[0]}")
             
@@ -536,11 +535,13 @@ HTML_TEMPLATE = '''
     <div class="container">
         <h1>🛰️ GPS NTP Server Dashboard</h1>
         
+        {% if ntp_stats_available %}
         <div style="text-align: center; margin-bottom: 20px;">
             <a href="/stats" style="background: white; color: #667eea; padding: 10px 20px; border-radius: 5px; text-decoration: none; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
                 📊 View NTP Statistics & Server Comparison
             </a>
         </div>
+        {% endif %}
         
         <div id="status-alert" class="alert alert-warning">
             <span class="status-indicator status-waiting"></span>
@@ -667,7 +668,6 @@ HTML_TEMPLATE = '''
         let map = null;
         let marker = null;
         
-        // Initialize map
         function initMap() {
             map = L.map('map').setView([0, 0], 2);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -675,7 +675,6 @@ HTML_TEMPLATE = '''
             }).addTo(map);
         }
         
-        // Update map position
         function updateMap(lat, lon) {
             if (map && lat && lon) {
                 const position = [lat, lon];
@@ -688,19 +687,19 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Format value with fallback
         function formatValue(value, suffix = '') {
             if (value === null || value === undefined) return '--';
             if (suffix) return value + suffix;
             return value;
         }
         
-        // Update dashboard
         function updateDashboard() {
             fetch('/api/gps')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch GPS data');
+                    return response.json();
+                })
                 .then(data => {
-                    // Update status alert
                     const alertDiv = document.getElementById('status-alert');
                     const statusIndicator = alertDiv.querySelector('.status-indicator');
                     
@@ -715,32 +714,24 @@ HTML_TEMPLATE = '''
                         alertDiv.innerHTML = '<span class="status-indicator status-waiting"></span>Waiting for GPS signal...';
                     }
                     
-                    // Update GPS status
                     document.getElementById('status').textContent = data.status;
                     document.getElementById('fix-quality').textContent = data.fix_quality;
                     document.getElementById('fix-type').textContent = data.fix_type;
                     document.getElementById('satellites').textContent = data.satellites;
                     document.getElementById('signal-quality').textContent = data.signal_quality;
                     document.getElementById('hdop').textContent = formatValue(data.hdop);
-                    
-                    // Update position
                     document.getElementById('latitude').textContent = formatValue(data.latitude, '°');
                     document.getElementById('longitude').textContent = formatValue(data.longitude, '°');
                     document.getElementById('altitude').textContent = formatValue(data.altitude, ' m');
                     document.getElementById('speed').textContent = formatValue(data.speed, ' knots');
                     document.getElementById('course').textContent = formatValue(data.course, '°');
-                    
-                    // Update time
                     document.getElementById('gps-time').textContent = formatValue(data.timestamp);
                     document.getElementById('gps-date').textContent = formatValue(data.date);
                     document.getElementById('last-update').textContent = formatValue(data.last_update);
-                    
-                    // Update statistics
                     document.getElementById('sentences-parsed').textContent = data.sentences_parsed;
                     document.getElementById('sentences-failed').textContent = data.sentences_failed;
                     document.getElementById('ntp-requests').textContent = data.ntp_clients_served;
                     
-                    // Update satellites in view
                     const satGrid = document.getElementById('satellite-grid');
                     if (data.satellites_in_view && data.satellites_in_view.length > 0) {
                         satGrid.innerHTML = data.satellites_in_view.map(sat => `
@@ -754,32 +745,40 @@ HTML_TEMPLATE = '''
                         satGrid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: #999;">No satellites in view</div>';
                     }
                     
-                    // Update map
                     if (data.latitude && data.longitude) {
                         updateMap(data.latitude, data.longitude);
                     }
                 })
-                .catch(error => console.error('Error fetching GPS data:', error));
+                .catch(error => {
+                    console.error('Error fetching GPS data:', error);
+                    document.getElementById('status-alert').className = 'alert alert-warning';
+                    document.getElementById('status-alert').innerHTML = '<span class="status-indicator status-error"></span>Error fetching GPS data';
+                });
             
-            // Fetch NTP stats
             fetch('/api/ntp')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch NTP stats');
+                    return response.json();
+                })
                 .then(data => {
                     document.getElementById('ntp-clients').textContent = Object.keys(data.clients).length;
                 })
-                .catch(error => console.error('Error fetching NTP stats:', error));
+                .catch(error => {
+                    console.error('Error fetching NTP stats:', error);
+                });
         }
         
-        // Update system time
         function updateSystemTime() {
             const now = new Date();
             document.getElementById('system-time').textContent = now.toISOString();
         }
         
-        // Get server IP
         function getServerIP() {
             fetch('/api/server-info')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to fetch server info');
+                    return response.json();
+                })
                 .then(data => {
                     document.getElementById('server-ip').textContent = data.ip + ':' + data.ntp_port;
                     document.querySelectorAll('.server-ip-text').forEach(el => {
@@ -789,13 +788,11 @@ HTML_TEMPLATE = '''
                 .catch(error => console.error('Error fetching server info:', error));
         }
         
-        // Initialize
         initMap();
         getServerIP();
         updateDashboard();
         updateSystemTime();
         
-        // Update every second
         setInterval(updateDashboard, 1000);
         setInterval(updateSystemTime, 1000);
     </script>
@@ -807,29 +804,30 @@ HTML_TEMPLATE = '''
 @app.route('/')
 def index():
     """Serve main dashboard"""
-    return render_template_string(HTML_TEMPLATE, ntp_port=app.config.get('NTP_PORT', 123))
+    return render_template_string(HTML_TEMPLATE, ntp_port=app.config.get('NTP_PORT', 123), ntp_stats_available=NTP_STATS_AVAILABLE)
 
 @app.route('/api/gps')
 def api_gps():
     """Return GPS data as JSON"""
-    return jsonify(gps_data)
+    with gps_data_lock:
+        return jsonify(gps_data)
 
 @app.route('/api/ntp')
 def api_ntp():
     """Return NTP statistics as JSON"""
-    return jsonify(ntp_stats)
+    with ntp_stats_lock:
+        return jsonify(ntp_stats)
 
 @app.route('/api/server-info')
 def api_server_info():
     """Return server information"""
     hostname = socket.gethostname()
     try:
-        # Try to get the actual IP address
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getvalue()
+        ip = s.getsockname()[0]  # Fixed: Use getsockname() instead of getvalue()
         s.close()
-    except:
+    except Exception:
         ip = socket.gethostbyname(hostname)
     
     return jsonify({
@@ -839,72 +837,69 @@ def api_server_info():
         'web_port': app.config.get('WEB_PORT', 5000)
     })
 
-@app.route('/api/config', methods=['GET', 'POST'])
+@app.route('/api/config', methods=['GET'])
 def api_config():
-    """Get or update configuration"""
-    if request.method == 'POST':
-        # Handle configuration updates
-        config = request.json
-        # TODO: Implement configuration updates
-        return jsonify({'status': 'success'})
-    else:
-        # Return current configuration
-        return jsonify({
-            'gps_port': gps_reader.port if 'gps_reader' in globals() else '/dev/ttyUSB0',
-            'gps_baudrate': gps_reader.baudrate if 'gps_reader' in globals() else 9600,
-            'ntp_port': app.config.get('NTP_PORT', 123),
-            'web_port': app.config.get('WEB_PORT', 5000)
-        })
+    """Get configuration"""
+    return jsonify({
+        'gps_port': gps_reader.port if 'gps_reader' in globals() else '/dev/ttyUSB0',
+        'gps_baudrate': gps_reader.baudrate if 'gps_reader' in globals() else 9600,
+        'ntp_port': app.config.get('NTP_PORT', 123),
+        'web_port': app.config.get('WEB_PORT', 5000)
+    })
+
+def validate_port(port, name):
+    """Validate port number"""
+    if not (0 < port <= 65535):
+        parser.error(f"{name} must be between 1 and 65535")
+    return port
 
 def main():
     """Main function"""
-    global gps_reader
+    global gps_reader, ntp_server
     
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description='GPS Web Server and NTP Time Server')
     parser.add_argument('--gps-port', default='/dev/ttyUSB0', help='GPS serial port (default: /dev/ttyUSB0)')
     parser.add_argument('--gps-baud', type=int, default=9600, help='GPS baud rate (default: 9600)')
-    parser.add_argument('--web-port', type=int, default=5000, help='Web server port (default: 5000)')
-    parser.add_argument('--ntp-port', type=int, default=123, help='NTP server port (default: 123)')
+    parser.add_argument('--web-port', type=lambda x: validate_port(int(x), 'Web port'), default=5000, help='Web server port (default: 5000)')
+    parser.add_argument('--ntp-port', type=lambda x: validate_port(int(x), 'NTP port'), default=123, help='NTP server port (default: 123)')
     parser.add_argument('--no-ntp', action='store_true', help='Disable NTP server')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     
     args = parser.parse_args()
     
-    # Configure logging
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    # Configure Flask
     app.config['NTP_PORT'] = args.ntp_port
     app.config['WEB_PORT'] = args.web_port
     
-    # Start GPS reader
     logger.info("Starting GPS reader...")
     gps_reader = GPSReader(port=args.gps_port, baudrate=args.gps_baud)
     gps_reader.start()
     
-    # Start NTP server
     if not args.no_ntp:
         logger.info("Starting NTP server...")
         ntp_server = NTPServer(port=args.ntp_port)
         ntp_server.start()
         
-        # Initialize NTP monitoring if available
         if NTP_STATS_AVAILABLE:
             logger.info("Initializing NTP monitoring...")
-            # Add local GPS server to monitoring
             custom_servers = [
                 {'address': '127.0.0.1', 'port': args.ntp_port, 'name': 'Local GPS (This Server)'}
             ]
             init_ntp_monitor(custom_servers)
     
-    # Start web server
     logger.info(f"Starting web server on port {args.web_port}...")
     logger.info(f"Open http://localhost:{args.web_port} in your browser")
     
     try:
         app.run(host='0.0.0.0', port=args.web_port, debug=False)
+    except OSError as e:
+        logger.error(f"Failed to start web server: {e}")
+        gps_reader.stop()
+        if not args.no_ntp:
+            ntp_server.stop()
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         gps_reader.stop()
