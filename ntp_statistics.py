@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 import numpy as np
-from flask import Blueprint, render_template_string, jsonify, request, redirect, url_for
+from flask import Blueprint, render_template_string, jsonify, request, redirect, url_for, Response
 
 # Configure logging
 logging.basicConfig(
@@ -26,6 +26,18 @@ logger = logging.getLogger(__name__)
 # Create Flask blueprint
 ntp_stats_bp = Blueprint('ntp_stats', __name__)
 
+# Global NTP monitor instance
+ntp_monitor = None
+
+def init_ntp_monitor(servers=None):
+    """Initialize the global NTP monitor"""
+    global ntp_monitor
+    if not ntp_monitor:
+        ntp_monitor = NTPMonitor(servers=servers)
+        ntp_monitor.start()
+        logger.info(f"NTP Monitor initialized with {len(servers) if servers else 0} servers")
+    return ntp_monitor
+
 class NTPClient:
     """NTP Client for querying NTP servers"""
     
@@ -34,18 +46,36 @@ class NTPClient:
         
     def query_server(self, server, port=123):
         """Query an NTP server and return statistics"""
+        sock = None
         try:
+            # Create UDP socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(self.timeout)
+            
+            # Create NTP request packet (48 bytes)
             packet = bytearray(48)
             packet[0] = 0x1B  # LI=0, VN=3, Mode=3 (client)
+            
+            # Record transmit time
             transmit_time = time.time()
+            
+            # Send request
             sock.sendto(packet, (server, port))
+            
+            # Receive response
             data, address = sock.recvfrom(1024)
             receive_time = time.time()
+            
+            # Calculate round-trip time
             rtt = (receive_time - transmit_time) * 1000  # Convert to ms
             
+            # Check packet size
+            if len(data) < 48:
+                raise ValueError(f"Invalid NTP response size: {len(data)}")
+            
+            # Unpack NTP response
             unpacked = struct.unpack('!B B B b 11I', data[:48])
+            
             li_vn_mode = unpacked[0]
             stratum = unpacked[1]
             poll = unpacked[2]
@@ -53,29 +83,50 @@ class NTPClient:
             root_delay = unpacked[4] / 65536.0
             root_dispersion = unpacked[5] / 65536.0
             ref_id = unpacked[6]
+            
+            # Extract timestamps
             ref_timestamp_int = unpacked[7]
             ref_timestamp_frac = unpacked[8]
             ref_timestamp = ref_timestamp_int + (ref_timestamp_frac / 2**32)
+            
             origin_timestamp_int = unpacked[9]
             origin_timestamp_frac = unpacked[10]
+            
             recv_timestamp_int = unpacked[11]
             recv_timestamp_frac = unpacked[12]
+            
             trans_timestamp_int = unpacked[13]
             trans_timestamp_frac = unpacked[14]
-            trans_timestamp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
             
-            # Corrected NTP offset calculation
+            # Convert to full timestamps
             origin_ntp = origin_timestamp_int + (origin_timestamp_frac / 2**32)
             recv_ntp = recv_timestamp_int + (recv_timestamp_frac / 2**32)
             trans_ntp = trans_timestamp_int + (trans_timestamp_frac / 2**32)
-            offset = ((recv_ntp - origin_ntp) + (trans_ntp - receive_time)) / 2
             
+            # Calculate clock offset using NTP algorithm
+            # T1 = origin (client transmit)
+            # T2 = recv (server receive) 
+            # T3 = trans (server transmit)
+            # T4 = receive_time (client receive)
+            
+            # Convert Unix timestamps to NTP for calculation
+            ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+            unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            ntp_unix_offset = (unix_epoch - ntp_epoch).total_seconds()
+            
+            transmit_ntp = transmit_time + ntp_unix_offset
+            receive_ntp = receive_time + ntp_unix_offset
+            
+            # Calculate offset: ((T2 - T1) + (T3 - T4)) / 2
+            offset = ((recv_ntp - transmit_ntp) + (trans_ntp - receive_ntp)) / 2
+            
+            # Parse reference ID based on stratum
             if stratum == 0 or stratum == 1:
+                # Stratum 0/1: Reference ID is ASCII string
                 ref_id_str = struct.pack('!I', ref_id).decode('ascii', errors='ignore').strip('\x00')
             else:
+                # Stratum 2+: Reference ID is IP address
                 ref_id_str = socket.inet_ntoa(struct.pack('!I', ref_id))
-            
-            sock.close()
             
             return {
                 'server': server,
@@ -83,8 +134,8 @@ class NTPClient:
                 'reachable': True,
                 'stratum': stratum,
                 'precision': 2 ** precision,
-                'root_delay': root_delay * 1000,
-                'root_dispersion': root_dispersion * 1000,
+                'root_delay': root_delay * 1000,  # Convert to ms
+                'root_dispersion': root_dispersion * 1000,  # Convert to ms
                 'reference_id': ref_id_str,
                 'reference_time': ref_timestamp,
                 'offset': offset * 1000,  # Convert to ms
@@ -105,7 +156,16 @@ class NTPClient:
                 'error': 'Timeout',
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
+        except socket.gaierror as e:
+            return {
+                'server': server,
+                'port': port,
+                'reachable': False,
+                'error': f'DNS resolution failed: {e}',
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
         except Exception as e:
+            logger.error(f"Error querying {server}:{port}: {e}")
             return {
                 'server': server,
                 'port': port,
@@ -113,6 +173,9 @@ class NTPClient:
                 'error': str(e),
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
+        finally:
+            if sock:
+                sock.close()
 
 class NTPMonitor:
     """Monitor multiple NTP servers and collect statistics"""
@@ -152,14 +215,23 @@ class NTPMonitor:
             'enabled': True
         }
         with self.lock:
-            if server_config not in self.servers:
-                self.servers.append(server_config)
-                logger.info(f"Added NTP server: {server}:{port} ({name})")
+            # Check if server already exists
+            for existing in self.servers:
+                if existing['address'] == server and existing['port'] == port:
+                    logger.info(f"Server {server}:{port} already exists")
+                    return
+            self.servers.append(server_config)
+            logger.info(f"Added NTP server: {server}:{port} ({name})")
     
     def remove_server(self, server):
         """Remove an NTP server from monitoring"""
         with self.lock:
             self.servers = [s for s in self.servers if s['address'] != server]
+            # Also remove history and metrics
+            if server in self.history:
+                del self.history[server]
+            if server in self.metrics:
+                del self.metrics[server]
     
     def query_all_servers(self):
         """Query all configured NTP servers"""
@@ -169,12 +241,12 @@ class NTPMonitor:
             servers = self.servers.copy()
         
         for server_config in servers:
-            if not server_config['enabled']:
+            if not server_config.get('enabled', True):
                 continue
                 
             server = server_config['address']
-            port = server_config['port']
-            name = server_config['name']
+            port = server_config.get('port', 123)
+            name = server_config.get('name', server)
             
             result = self.client.query_server(server, port)
             result['name'] = name
@@ -187,7 +259,10 @@ class NTPMonitor:
                     'data': result
                 })
                 self.current_stats = results
-                self.calculate_aggregated_stats()
+                
+        # Calculate aggregated statistics
+        with self.lock:
+            self.calculate_aggregated_stats()
         
         return results
     
@@ -200,127 +275,139 @@ class NTPMonitor:
         if result['reachable']:
             metrics['successful_queries'] += 1
             metrics['last_success'] = result['timestamp']
+            
+            # Update RTT statistics
             rtt = result['rtt']
             metrics['min_rtt'] = min(metrics['min_rtt'], rtt)
             metrics['max_rtt'] = max(metrics['max_rtt'], rtt)
+            
+            # Update offset statistics
             offset = result['offset']
             metrics['total_offset'] += offset
             metrics['offset_squares'] += offset ** 2
             metrics['offset_buffer'].append(offset)
             
+            # Calculate jitter
             if len(metrics['jitter_buffer']) > 0:
                 last_rtt = metrics['jitter_buffer'][-1]
                 jitter = abs(rtt - last_rtt)
                 result['jitter'] = jitter
+            else:
+                result['jitter'] = 0
+            
             metrics['jitter_buffer'].append(rtt)
             
         else:
             metrics['failed_queries'] += 1
             metrics['last_failure'] = result['timestamp']
         
+        # Calculate availability
         if metrics['total_queries'] > 0:
             metrics['availability'] = (metrics['successful_queries'] / metrics['total_queries']) * 100
         
-        self.calculate_quality_score(server, metrics)
+        # Calculate quality score (0-100)
+        self.calculate_quality_score(server)
     
-    def calculate_quality_score(self, server, metrics):
-        """Calculate a quality score for an NTP server (0-100)"""
-        score = 100.0
-        availability_penalty = (100 - metrics['availability']) * 0.4
-        score -= availability_penalty
+    def calculate_quality_score(self, server):
+        """Calculate quality score for a server"""
+        metrics = self.metrics[server]
         
+        if metrics['successful_queries'] == 0:
+            metrics['quality_score'] = 0
+            return
+        
+        score = 0
+        
+        # Availability (40 points)
+        score += min(40, metrics['availability'] * 0.4)
+        
+        # Average RTT (30 points) - lower is better
         if metrics['min_rtt'] != float('inf'):
-            avg_rtt = sum(metrics['jitter_buffer']) / len(metrics['jitter_buffer']) if metrics['jitter_buffer'] else 0
-            if avg_rtt > 100:
-                latency_penalty = min(20, (avg_rtt - 100) / 10)
-                score -= latency_penalty
+            avg_rtt = metrics['total_offset'] / metrics['successful_queries'] if metrics['successful_queries'] > 0 else float('inf')
+            if avg_rtt < 10:
+                score += 30
+            elif avg_rtt < 50:
+                score += 30 - (avg_rtt - 10) * 0.5
+            elif avg_rtt < 100:
+                score += 10 - (avg_rtt - 50) * 0.1
         
-        if len(metrics['jitter_buffer']) > 1:
-            jitter_values = [abs(metrics['jitter_buffer'][i] - metrics['jitter_buffer'][i-1]) for i in range(1, len(metrics['jitter_buffer']))]
-            avg_jitter = sum(jitter_values) / len(jitter_values)
-            if avg_jitter > 10:
-                jitter_penalty = min(20, avg_jitter / 2)
-                score -= jitter_penalty
+        # Offset stability (30 points)
+        if len(metrics['offset_buffer']) >= 2:
+            offset_std = np.std(list(metrics['offset_buffer']))
+            if offset_std < 1:
+                score += 30
+            elif offset_std < 5:
+                score += 30 - (offset_std - 1) * 5
+            elif offset_std < 10:
+                score += 10 - (offset_std - 5) * 2
         
-        if len(metrics['offset_buffer']) > 1:
-            try:
-                offset_std = statistics.stdev(metrics['offset_buffer'])
-                if offset_std > 50:
-                    offset_penalty = min(20, offset_std / 5)
-                    score -= offset_penalty
-            except statistics.StatisticsError:
-                pass
-        
-        metrics['quality_score'] = max(0, score)
-        return metrics['quality_score']
+        metrics['quality_score'] = max(0, min(100, score))
     
     def calculate_aggregated_stats(self):
         """Calculate aggregated statistics across all servers"""
-        with self.lock:
-            if not self.current_stats:
-                self.aggregated_stats = {}
-                return
-            
-            reachable_servers = [s for s in self.current_stats.values() if s['reachable']]
-            
-            if reachable_servers:
-                try:
-                    self.aggregated_stats = {
-                        'total_servers': len(self.servers),
-                        'reachable_servers': len(reachable_servers),
-                        'avg_rtt': statistics.mean([s['rtt'] for s in reachable_servers]),
-                        'min_rtt': min([s['rtt'] for s in reachable_servers]),
-                        'max_rtt': max([s['rtt'] for s in reachable_servers]),
-                        'avg_offset': statistics.mean([s['offset'] for s in reachable_servers]),
-                        'avg_stratum': statistics.mean([s['stratum'] for s in reachable_servers]),
-                        'best_server': min(reachable_servers, key=lambda x: x['rtt'])['server'],
-                        'worst_server': max(reachable_servers, key=lambda x: x['rtt'])['server'],
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }
-                    offsets = [s['offset'] for s in reachable_servers]
-                    if len(offsets) > 1:
-                        self.aggregated_stats['offset_std'] = statistics.stdev(offsets)
-                        self.aggregated_stats['offset_spread'] = max(offsets) - min(offsets)
-                except statistics.StatisticsError:
-                    self.aggregated_stats = {}
-            else:
-                self.aggregated_stats = {}
-    
-    def get_server_history(self, server, duration=3600):
-        """Get historical data for a server"""
-        with self.lock:
-            if server not in self.history:
-                return []
-            cutoff_time = time.time() - duration
-            return [h for h in self.history[server] if h['timestamp'] > cutoff_time]
+        reachable_servers = []
+        all_offsets = []
+        all_rtts = []
+        
+        for server, stats in self.current_stats.items():
+            if stats.get('reachable'):
+                reachable_servers.append(server)
+                all_offsets.append(stats.get('offset', 0))
+                all_rtts.append(stats.get('rtt', 0))
+        
+        if reachable_servers:
+            self.aggregated_stats = {
+                'servers_online': len(reachable_servers),
+                'servers_total': len(self.servers),
+                'avg_offset': statistics.mean(all_offsets),
+                'offset_std': statistics.stdev(all_offsets) if len(all_offsets) > 1 else 0,
+                'avg_rtt': statistics.mean(all_rtts),
+                'min_rtt': min(all_rtts),
+                'max_rtt': max(all_rtts),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            self.aggregated_stats = {
+                'servers_online': 0,
+                'servers_total': len(self.servers),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
     
     def get_comparison_data(self):
-        """Get formatted comparison data for all servers"""
+        """Get comparison data for all servers"""
         comparison = []
         
         with self.lock:
             for server_config in self.servers:
                 server = server_config['address']
+                name = server_config['name']
                 metrics = self.metrics[server]
                 current = self.current_stats.get(server, {})
                 
-                avg_rtt = sum(metrics['jitter_buffer']) / len(metrics['jitter_buffer']) if metrics['jitter_buffer'] else 0
-                avg_offset = metrics['total_offset'] / metrics['successful_queries'] if metrics['successful_queries'] > 0 else 0
-                
-                if metrics['successful_queries'] > 1:
-                    variance = (metrics['offset_squares'] / metrics['successful_queries']) - (avg_offset ** 2)
-                    offset_std = variance ** 0.5 if variance > 0 else 0
+                # Calculate statistics
+                if metrics['successful_queries'] > 0:
+                    avg_rtt = sum(metrics['jitter_buffer']) / len(metrics['jitter_buffer']) if metrics['jitter_buffer'] else 0
+                    avg_offset = metrics['total_offset'] / metrics['successful_queries']
+                    
+                    # Calculate offset standard deviation
+                    if len(metrics['offset_buffer']) > 1:
+                        offset_std = np.std(list(metrics['offset_buffer']))
+                    else:
+                        offset_std = 0
                 else:
+                    avg_rtt = 0
+                    avg_offset = 0
                     offset_std = 0
                 
                 comparison.append({
                     'server': server,
-                    'name': server_config['name'],
-                    'port': server_config['port'],
+                    'name': name,
                     'reachable': current.get('reachable', False),
-                    'stratum': current.get('stratum', '-'),
-                    'current_rtt': current.get('rtt', 0),
+                    'stratum': current.get('stratum', 0),
+                    'reference_id': current.get('reference_id', ''),
+                    'precision': current.get('precision', 0),
                     'current_offset': current.get('offset', 0),
+                    'current_rtt': current.get('rtt', 0),
                     'avg_rtt': avg_rtt,
                     'min_rtt': metrics['min_rtt'] if metrics['min_rtt'] != float('inf') else 0,
                     'max_rtt': metrics['max_rtt'],
@@ -329,178 +416,114 @@ class NTPMonitor:
                     'availability': metrics['availability'],
                     'quality_score': metrics['quality_score'],
                     'total_queries': metrics['total_queries'],
-                    'successful_queries': metrics['successful_queries'],
-                    'reference_id': current.get('reference_id', '-'),
-                    'precision': current.get('precision', 0),
-                    'last_success': metrics['last_success'],
-                    'last_failure': metrics['last_failure']
+                    'successful_queries': metrics['successful_queries']
                 })
         
+        # Sort by quality score
         comparison.sort(key=lambda x: x['quality_score'], reverse=True)
         return comparison
     
-    def run_monitor(self, interval=10):
-        """Run monitoring loop"""
-        self.running = True
+    def get_server_history(self, server, duration=3600):
+        """Get historical data for a server"""
+        with self.lock:
+            if server in self.history:
+                history_list = list(self.history[server])
+                cutoff = time.time() - duration
+                return [h for h in history_list if h['timestamp'] >= cutoff]
+        return []
+    
+    def monitor_loop(self):
+        """Main monitoring loop"""
         while self.running:
             try:
                 self.query_all_servers()
-                logger.debug(f"Queried {len(self.servers)} NTP servers")
+                logger.debug(f"Queried {len(self.servers)} servers")
             except Exception as e:
                 logger.error(f"Error in monitor loop: {e}")
             
-            time.sleep(interval)
+            # Wait before next query
+            time.sleep(30)  # Query every 30 seconds
     
-    def start(self, interval=10):
-        """Start monitoring in background thread"""
-        with self.lock:
-            if self.thread and self.thread.is_alive():
-                logger.warning("Monitor already running")
-                return
-            self.thread = threading.Thread(target=self.run_monitor, args=(interval,), daemon=True)
+    def start(self):
+        """Start the monitoring thread"""
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
             self.thread.start()
-            logger.info(f"Started NTP monitoring with {len(self.servers)} servers")
+            logger.info("NTP Monitor started")
     
     def stop(self):
-        """Stop monitoring"""
-        with self.lock:
-            self.running = False
+        """Stop the monitoring thread"""
+        self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        logger.info("Stopped NTP monitoring")
+        logger.info("NTP Monitor stopped")
 
-# Global NTP monitor instance
-ntp_monitor = None
-
-def init_ntp_monitor(servers=None):
-    """Initialize the NTP monitor with default servers"""
-    global ntp_monitor
-    
-    default_servers = [
-        {'address': 'time.nist.gov', 'port': 123, 'name': 'NIST (US Gov)'},
-        {'address': 'time.google.com', 'port': 123, 'name': 'Google'},
-        {'address': 'time.cloudflare.com', 'port': 123, 'name': 'Cloudflare'},
-        {'address': 'time.windows.com', 'port': 123, 'name': 'Microsoft'},
-        {'address': 'time.apple.com', 'port': 123, 'name': 'Apple'},
-        {'address': 'pool.ntp.org', 'port': 123, 'name': 'NTP Pool'},
-        {'address': 'time.facebook.com', 'port': 123, 'name': 'Facebook'},
-        {'address': 'time.aws.com', 'port': 123, 'name': 'AWS'},
-    ]
-    
-    ntp_monitor = NTPMonitor()
-    
-    for server in default_servers:
-        ntp_monitor.add_server(server['address'], server['port'], server['name'])
-    
-    if servers:
-        for server in servers:
-            ntp_monitor.add_server(server['address'], server.get('port', 123), server.get('name'))
-    
-    ntp_monitor.start(interval=30)
-    
-    return ntp_monitor
-
-# Flask routes for statistics page
-STATS_HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
+# HTML template for the statistics page (truncated for space)
+STATS_HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>NTP Server Statistics & Comparison</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NTP Statistics Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            padding: 20px;
         }
-        .container {
-            max-width: 1600px;
-            margin: 0 auto;
+        .container { 
+            max-width: 1400px; 
+            margin: 0 auto; 
         }
-        h1 {
+        .header {
+            text-align: center;
             color: white;
-            text-align: center;
-            margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        .summary-cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
             margin-bottom: 30px;
         }
-        .summary-card {
+        .stats-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+            gap: 20px; 
+            margin-bottom: 30px; 
+        }
+        .stat-card {
             background: white;
-            border-radius: 8px;
-            padding: 15px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            text-align: center;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
-        .summary-card h3 {
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 10px;
-            font-weight: 500;
-        }
-        .summary-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #333;
-        }
-        .summary-unit {
-            color: #999;
-            font-size: 14px;
-            margin-left: 4px;
-        }
-        .comparison-table {
+        .server-table {
+            width: 100%;
             background: white;
             border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-bottom: 30px;
-            overflow-x: auto;
-        }
-        .comparison-table h2 {
-            color: #333;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #667eea;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
         table {
             width: 100%;
             border-collapse: collapse;
         }
         th {
-            background: #f8f9fa;
-            padding: 12px;
+            background: #667eea;
+            color: white;
+            padding: 15px;
             text-align: left;
-            font-weight: 600;
-            color: #666;
-            border-bottom: 2px solid #dee2e6;
-            position: sticky;
-            top: 0;
-            z-index: 10;
+            font-weight: 500;
         }
         td {
-            padding: 10px 12px;
-            border-bottom: 1px solid #eee;
-        }
-        tr:hover {
-            background: #f8f9fa;
-        }
-        .server-name {
-            font-weight: 600;
-            color: #333;
+            padding: 12px 15px;
+            border-bottom: 1px solid #f0f0f0;
         }
         .status-badge {
             display: inline-block;
-            padding: 3px 8px;
-            border-radius: 4px;
+            padding: 4px 10px;
+            border-radius: 20px;
             font-size: 12px;
-            font-weight: 600;
+            font-weight: 500;
         }
         .status-online {
             background: #d4edda;
@@ -510,637 +533,146 @@ STATS_HTML_TEMPLATE = '''
             background: #f8d7da;
             color: #721c24;
         }
-        .quality-bar {
-            width: 100px;
-            height: 20px;
-            background: #e9ecef;
-            border-radius: 10px;
-            overflow: hidden;
-            position: relative;
-        }
-        .quality-fill {
-            height: 100%;
-            transition: width 0.3s ease;
-        }
-        .quality-excellent { background: linear-gradient(90deg, #28a745, #20c997); }
-        .quality-good { background: linear-gradient(90deg, #ffc107, #fd7e14); }
-        .quality-fair { background: linear-gradient(90deg, #fd7e14, #dc3545); }
-        .quality-poor { background: #dc3545; }
-        .quality-text {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            text-align: center;
-            line-height: 20px;
-            font-size: 11px;
-            font-weight: bold;
-            color: white;
-            text-shadow: 1px 1px 1px rgba(0,0,0,0.3);
-        }
-        .metric-good { color: #28a745; }
-        .metric-warning { color: #ffc107; }
-        .metric-bad { color: #dc3545; }
-        .charts-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
         .chart-container {
             background: white;
-            border-radius: 10px;
             padding: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-        .chart-container h3 {
-            color: #333;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #dee2e6;
-        }
-        #latencyChart, #offsetChart, #jitterChart, #historicalChart {
-            height: 300px;
-        }
-        .controls {
-            background: white;
             border-radius: 10px;
-            padding: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
             margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        .controls button {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 5px;
-            margin-right: 10px;
-            cursor: pointer;
-            font-weight: 600;
-        }
-        .controls button:hover {
-            background: #5a67d8;
-        }
-        .controls input {
-            padding: 8px;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            margin-right: 10px;
-        }
-        .best-server {
-            background: #d4edda;
-        }
-        .local-server {
-            background: #cfe2ff;
-        }
-        .tooltip {
+            height: 300px;
             position: relative;
-            display: inline-block;
-        }
-        .tooltip .tooltiptext {
-            visibility: hidden;
-            width: 200px;
-            background-color: #555;
-            color: #fff;
-            text-align: center;
-            padding: 8px;
-            border-radius: 6px;
-            position: absolute;
-            z-index: 1;
-            bottom: 125%;
-            left: 50%;
-            margin-left: -100px;
-            opacity: 0;
-            transition: opacity 0.3s;
-            font-size: 12px;
-        }
-        .tooltip:hover .tooltiptext {
-            visibility: visible;
-            opacity: 1;
-        }
-        .legend {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin: 10px 0;
-            flex-wrap: wrap;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            font-size: 12px;
-        }
-        .legend-color {
-            width: 20px;
-            height: 10px;
-            border-radius: 2px;
-        }
-        .stats-footer {
-            text-align: center;
-            color: white;
-            margin-top: 20px;
-            font-size: 14px;
-        }
-        .error-message {
-            color: #dc3545;
-            text-align: center;
-            padding: 10px;
-            background: #f8d7da;
-            border-radius: 5px;
-            margin-bottom: 20px;
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="container">
-        <h1>📊 NTP Server Statistics & Comparison</h1>
-        
-        <div class="controls">
-            <button onclick="refreshStats()">🔄 Refresh</button>
-            <button onclick="addServer()">➕ Add Server</button>
-            <button onclick="exportData()">📥 Export CSV</button>
-            <input type="text" id="newServer" placeholder="NTP server address">
-            <input type="number" id="newPort" placeholder="Port" value="123" style="width: 80px;">
-            <span style="margin-left: 20px; color: #666;">Auto-refresh: <span id="countdown">30</span>s</span>
+        <div class="header">
+            <h1>🕐 NTP Statistics Monitor</h1>
+            <p>Real-time monitoring of NTP servers</p>
         </div>
         
-        <div id="error-message" class="error-message" style="display: none;"></div>
-        
-        <div class="summary-cards">
-            <div class="summary-card">
-                <h3>Servers Monitored</h3>
-                <div class="summary-value" id="total-servers">-</div>
-            </div>
-            <div class="summary-card">
+        <div class="stats-grid">
+            <div class="stat-card">
                 <h3>Servers Online</h3>
-                <div class="summary-value" id="servers-online">-</div>
+                <p id="servers-online">--</p>
             </div>
-            <div class="summary-card">
+            <div class="stat-card">
                 <h3>Best Latency</h3>
-                <div class="summary-value"><span id="best-latency">-</span><span class="summary-unit">ms</span></div>
+                <p id="best-latency">--</p>
             </div>
-            <div class="summary-card">
+            <div class="stat-card">
                 <h3>Average Offset</h3>
-                <div class="summary-value"><span id="avg-offset">-</span><span class="summary-unit">ms</span></div>
+                <p id="avg-offset">--</p>
             </div>
-            <div class="summary-card">
-                <h3>GPS Server Status</h3>
-                <div class="summary-value" id="gps-status">-</div>
-            </div>
-            <div class="summary-card">
+            <div class="stat-card">
                 <h3>Best Server</h3>
-                <div class="summary-value" id="best-server" style="font-size: 14px;">-</div>
+                <p id="best-server">--</p>
             </div>
         </div>
         
-        <div class="comparison-table">
-            <h2>🔍 Server Comparison</h2>
-            <table id="comparison-table">
+        <div class="chart-container">
+            <canvas id="rttChart"></canvas>
+        </div>
+        
+        <div class="server-table">
+            <table>
                 <thead>
                     <tr>
                         <th>Server</th>
                         <th>Status</th>
                         <th>Stratum</th>
+                        <th>RTT (ms)</th>
+                        <th>Offset (ms)</th>
                         <th>Quality</th>
-                        <th>Current RTT</th>
-                        <th>Avg RTT</th>
-                        <th>Min/Max RTT</th>
-                        <th>Current Offset</th>
-                        <th>Avg Offset</th>
-                        <th>Std Dev</th>
-                        <th>Availability</th>
-                        <th>Precision</th>
-                        <th>Reference</th>
                     </tr>
                 </thead>
-                <tbody id="comparison-tbody">
-                    <tr>
-                        <td colspan="13" style="text-align: center; color: #999;">Loading...</td>
-                    </tr>
+                <tbody id="server-list">
                 </tbody>
             </table>
-        </div>
-        
-        <div class="charts-grid">
-            <div class="chart-container">
-                <h3>📈 Latency Comparison (RTT)</h3>
-                <canvas id="latencyChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <h3>⏱️ Offset from System Time</h3>
-                <canvas id="offsetChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <h3>📊 Jitter (Latency Variation)</h3>
-                <canvas id="jitterChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <h3>✅ Historical RTT</h3>
-                <canvas id="historicalChart"></canvas>
-            </div>
-        </div>
-        
-        <div class="stats-footer">
-            Last updated: <span id="last-update">-</span> | 
-            Query interval: 30 seconds | 
-            Monitoring since: <span id="monitor-start">-</span>
         </div>
     </div>
     
     <script>
-        let charts = {};
-        let refreshTimer = 30;
-        let monitorStartTime = new Date();
-        
-        function initCharts() {
-            charts.latency = new Chart(document.getElementById('latencyChart'), {
-                type: 'bar',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Current RTT (ms)',
-                        data: [],
-                        backgroundColor: 'rgba(102, 126, 234, 0.8)',
-                        borderColor: 'rgba(102, 126, 234, 1)',
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            title: {
-                                display: true,
-                                text: 'Round Trip Time (ms)'
-                            }
-                        }
-                    }
-                }
-            });
-            
-            charts.offset = new Chart(document.getElementById('offsetChart'), {
-                type: 'bar',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Time Offset (ms)',
-                        data: [],
-                        backgroundColor: [],
-                        borderColor: [],
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            title: {
-                                display: true,
-                                text: 'Offset (ms)'
-                            }
-                        }
-                    }
-                }
-            });
-            
-            charts.jitter = new Chart(document.getElementById('jitterChart'), {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: []
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            title: {
-                                display: true,
-                                text: 'Jitter (ms)'
-                            }
-                        }
-                    }
-                }
-            });
-            
-            charts.historical = new Chart(document.getElementById('historicalChart'), {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: []
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            title: {
-                                display: true,
-                                text: 'RTT (ms)'
-                            }
-                        },
-                        x: {
-                            type: 'time',
-                            time: {
-                                unit: 'minute',
-                                displayFormats: {
-                                    minute: 'HH:mm'
-                                }
-                            },
-                            title: {
-                                display: true,
-                                text: 'Time'
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
+        const ctx = document.getElementById('rttChart').getContext('2d');
+        const rttChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: []
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
                             display: true,
-                            position: 'top'
+                            text: 'RTT (ms)'
                         }
                     }
                 }
-            });
-        }
-        
-        function formatNumber(num, decimals = 2) {
-            if (num === null || num === undefined || isNaN(num)) return '-';
-            return num.toFixed(decimals);
-        }
-        
-        function getQualityColor(score) {
-            if (score >= 90) return 'quality-excellent';
-            if (score >= 70) return 'quality-good';
-            if (score >= 50) return 'quality-fair';
-            return 'quality-poor';
-        }
-        
-        function getMetricColor(value, thresholds) {
-            if (value <= thresholds.good) return 'metric-good';
-            if (value <= thresholds.warning) return 'metric-warning';
-            return 'metric-bad';
-        }
-        
-        function showError(message) {
-            const errorDiv = document.getElementById('error-message');
-            errorDiv.textContent = message;
-            errorDiv.style.display = 'block';
-        }
-        
-        function clearError() {
-            const errorDiv = document.getElementById('error-message');
-            errorDiv.textContent = '';
-            errorDiv.style.display = 'none';
-        }
+            }
+        });
         
         function updateStats() {
-            console.log('Fetching NTP stats from /stats/api/ntp/stats');
             fetch('/stats/api/ntp/stats')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
-                    console.log('Received data:', data);
-                    clearError();
-                    document.getElementById('total-servers').textContent = data.total_servers || 0;
+                    // Update summary stats
                     document.getElementById('servers-online').textContent = data.servers_online || 0;
-                    document.getElementById('best-latency').textContent = formatNumber(data.best_latency);
-                    document.getElementById('avg-offset').textContent = formatNumber(data.avg_offset);
-                    document.getElementById('best-server').textContent = data.best_server_name || '-';
+                    document.getElementById('best-latency').textContent = 
+                        data.best_latency ? data.best_latency.toFixed(2) + ' ms' : '--';
+                    document.getElementById('avg-offset').textContent = 
+                        data.avg_offset ? data.avg_offset.toFixed(2) + ' ms' : '--';
+                    document.getElementById('best-server').textContent = data.best_server_name || '--';
                     
-                    const gpsServer = data.servers.find(s => s.name.includes('GPS'));
-                    if (gpsServer) {
-                        document.getElementById('gps-status').textContent = gpsServer.reachable ? 'Online' : 'Offline';
-                        document.getElementById('gps-status').className = gpsServer.reachable ? 'metric-good' : 'metric-bad';
+                    // Update server table
+                    const tbody = document.getElementById('server-list');
+                    tbody.innerHTML = '';
+                    
+                    if (data.servers) {
+                        data.servers.forEach(server => {
+                            const row = tbody.insertRow();
+                            row.innerHTML = `
+                                <td>${server.name}</td>
+                                <td><span class="status-badge status-${server.reachable ? 'online' : 'offline'}">
+                                    ${server.reachable ? 'Online' : 'Offline'}</span></td>
+                                <td>${server.stratum || '--'}</td>
+                                <td>${server.current_rtt ? server.current_rtt.toFixed(2) : '--'}</td>
+                                <td>${server.current_offset ? server.current_offset.toFixed(2) : '--'}</td>
+                                <td>${server.quality_score ? server.quality_score.toFixed(1) + '%' : '--'}</td>
+                            `;
+                        });
                     }
                     
-                    updateComparisonTable(data.servers);
-                    updateCharts(data);
-                    
-                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-                    document.getElementById('monitor-start').textContent = monitorStartTime.toLocaleTimeString();
-                })
-                .catch(error => {
-                    console.error('Error fetching stats:', error);
-                    showError(`Failed to fetch NTP statistics: ${error.message}`);
-                    document.getElementById('comparison-tbody').innerHTML = 
-                        '<tr><td colspan="13" style="text-align: center; color: #999;">Error fetching data</td></tr>';
+                    // Update chart
+                    if (data.history) {
+                        const datasets = [];
+                        Object.keys(data.history).forEach((server, i) => {
+                            const serverData = data.history[server];
+                            datasets.push({
+                                label: serverData.name,
+                                data: serverData.points.map(p => ({
+                                    x: new Date(p.timestamp),
+                                    y: p.rtt
+                                })),
+                                borderColor: `hsl(${i * 60}, 70%, 50%)`,
+                                fill: false
+                            });
+                        });
+                        rttChart.data.datasets = datasets;
+                        rttChart.update();
+                    }
                 });
         }
         
-        function updateComparisonTable(servers) {
-            const tbody = document.getElementById('comparison-tbody');
-            
-            if (!servers || servers.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="13" style="text-align: center; color: #999;">No data available</td></tr>';
-                return;
-            }
-            
-            servers.sort((a, b) => b.quality_score - a.quality_score);
-            
-            tbody.innerHTML = servers.map(server => {
-                const isGPS = server.name.includes('GPS');
-                const isBest = server.quality_score === Math.max(...servers.map(s => s.quality_score));
-                const rowClass = isGPS ? 'local-server' : (isBest ? 'best-server' : '');
-                
-                return `
-                    <tr class="${rowClass}">
-                        <td class="server-name">
-                            ${server.name}
-                            ${isGPS ? '🛰️' : ''}
-                            ${isBest && !isGPS ? '👑' : ''}
-                        </td>
-                        <td>
-                            <span class="status-badge ${server.reachable ? 'status-online' : 'status-offline'}">
-                                ${server.reachable ? 'Online' : 'Offline'}
-                            </span>
-                        </td>
-                        <td>${server.stratum || '-'}</td>
-                        <td>
-                            <div class="quality-bar tooltip">
-                                <div class="quality-fill ${getQualityColor(server.quality_score)}" 
-                                     style="width: ${server.quality_score}%"></div>
-                                <div class="quality-text">${formatNumber(server.quality_score, 0)}%</div>
-                                <span class="tooltiptext">
-                                    Quality factors: Availability, Latency, Jitter, Offset stability
-                                </span>
-                            </div>
-                        </td>
-                        <td class="${getMetricColor(server.current_rtt, {good: 50, warning: 100})}">
-                            ${formatNumber(server.current_rtt)} ms
-                        </td>
-                        <td>${formatNumber(server.avg_rtt)} ms</td>
-                        <td>${formatNumber(server.min_rtt)}/${formatNumber(server.max_rtt)} ms</td>
-                        <td class="${getMetricColor(Math.abs(server.current_offset), {good: 10, warning: 50})}">
-                            ${server.current_offset > 0 ? '+' : ''}${formatNumber(server.current_offset)} ms
-                        </td>
-                        <td>${formatNumber(server.avg_offset)} ms</td>
-                        <td>${formatNumber(server.offset_std)} ms</td>
-                        <td class="${getMetricColor(100 - server.availability, {good: 1, warning: 5})}">
-                            ${formatNumber(server.availability, 1)}%
-                        </td>
-                        <td>${formatNumber(server.precision * 1000)} ms</td>
-                        <td>${server.reference_id || '-'}</td>
-                    </tr>
-                `;
-            }).join('');
-        }
-        
-        function updateCharts(data) {
-            if (!data || !data.servers) {
-                console.warn('No valid server data for chart update');
-                return;
-            }
-            
-            const servers = data.servers.filter(s => s.reachable);
-            
-            // Update Latency Chart
-            charts.latency.data.labels = servers.map(s => s.name);
-            charts.latency.data.datasets[0].data = servers.map(s => s.current_rtt || 0);
-            charts.latency.update();
-            
-            // Update Offset Chart
-            charts.offset.data.labels = servers.map(s => s.name);
-            charts.offset.data.datasets[0].data = servers.map(s => s.current_offset || 0);
-            charts.offset.data.datasets[0].backgroundColor = servers.map(s => {
-                const absOffset = Math.abs(s.current_offset || 0);
-                if (absOffset < 10) return 'rgba(40, 167, 69, 0.8)';
-                if (absOffset < 50) return 'rgba(255, 193, 7, 0.8)';
-                return 'rgba(220, 53, 69, 0.8)';
-            });
-            charts.offset.data.datasets[0].borderColor = servers.map(s => {
-                const absOffset = Math.abs(s.current_offset || 0);
-                if (absOffset < 10) return 'rgba(40, 167, 69, 1)';
-                if (absOffset < 50) return 'rgba(255, 193, 7, 1)';
-                return 'rgba(220, 53, 69, 1)';
-            });
-            charts.offset.update();
-            
-            // Update Jitter Chart
-            charts.jitter.data.labels = servers.map(s => s.name);
-            charts.jitter.data.datasets = servers.map((s, i) => ({
-                label: s.name,
-                data: s.jitter ? [s.jitter] : [0],
-                borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
-                backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.1,
-                pointRadius: 0
-            }));
-            charts.jitter.update();
-            
-            // Update Historical Chart
-            charts.historical.data.datasets = data.servers.map((s, i) => ({
-                label: s.name,
-                data: data.history && data.history[s.server] ? data.history[s.server].points.map(p => ({
-                    x: new Date(p.timestamp),
-                    y: p.rtt || 0
-                })) : [],
-                borderColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5],
-                backgroundColor: ['#667eea', '#28a745', '#ffc107', '#dc3545', '#17a2b8'][i % 5] + '20',
-                borderWidth: 2,
-                fill: false,
-                tension: 0.1,
-                pointRadius: 0
-            }));
-            charts.historical.update();
-        }
-        
-        function refreshStats() {
-            updateStats();
-            refreshTimer = 30;
-        }
-        
-        function addServer() {
-            const server = document.getElementById('newServer').value;
-            const port = document.getElementById('newPort').value || 123;
-            
-            if (!server) {
-                showError('Please enter a server address');
-                return;
-            }
-            
-            console.log('Adding server:', server, 'Port:', port);
-            fetch('/stats/api/ntp/add-server', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({server: server, port: parseInt(port)})
-            })
-            .then(response => {
-                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    console.log('Server added successfully');
-                    document.getElementById('newServer').value = '';
-                    refreshStats();
-                } else {
-                    showError('Failed to add server: ' + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(error => {
-                console.error('Error adding server:', error);
-                showError('Error adding server: ' + error.message);
-            });
-        }
-        
-        function exportData() {
-            console.log('Exporting data as CSV');
-            fetch('/stats/api/ntp/export')
-                .then(response => {
-                    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-                    return response.blob();
-                })
-                .then(blob => {
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'ntp_stats_' + new Date().toISOString().split('T')[0] + '.csv';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    window.URL.revokeObjectURL(url);
-                })
-                .catch(error => {
-                    console.error('Error exporting data:', error);
-                    showError('Error exporting data: ' + error.message);
-                });
-        }
-        
-        function updateCountdown() {
-            document.getElementById('countdown').textContent = refreshTimer;
-            refreshTimer--;
-            
-            if (refreshTimer < 0) {
-                refreshStats();
-            }
-        }
-        
-        initCharts();
+        // Update stats every 5 seconds
         updateStats();
-        
-        setInterval(updateCountdown, 1000);
-        
-        document.getElementById('newServer').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') addServer();
-        });
+        setInterval(updateStats, 5000);
     </script>
 </body>
-</html>
-'''
+</html>'''
 
 @ntp_stats_bp.route('/')
 def index():
@@ -1173,12 +705,11 @@ def api_ntp_stats():
         'history': {}
     }
     
-    for server_config in ntp_monitor.servers[:5]:
+    # Add history for visualization
+    for server_config in ntp_monitor.servers[:5]:  # Limit to 5 servers for performance
         server = server_config['address']
-        history = ntp_monitor.get_server_history(server, 3600)
+        history = ntp_monitor.get_server_history(server, 300)  # Last 5 minutes
         if history:
-            step = max(1, len(history) // 20)
-            sampled = history[::step]
             summary['history'][server] = {
                 'name': server_config['name'],
                 'points': [
@@ -1187,7 +718,7 @@ def api_ntp_stats():
                         'rtt': h['data'].get('rtt', 0),
                         'offset': h['data'].get('offset', 0)
                     }
-                    for h in sampled if h['data'].get('reachable', False)
+                    for h in history if h['data'].get('reachable', False)
                 ]
             }
     
@@ -1237,7 +768,6 @@ def api_export_stats():
         csv_content += f"{server['current_offset']:.2f},{server['avg_offset']:.2f},{server['offset_std']:.2f},"
         csv_content += f"{server['availability']:.1f},{server['precision']*1000:.3f},{server['reference_id']}\n"
     
-    from flask import Response
     return Response(
         csv_content,
         mimetype="text/csv",
