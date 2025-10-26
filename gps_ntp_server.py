@@ -749,9 +749,9 @@ def index():
 
 if __name__ == '__main__':
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='GPS NTP Server')
-    parser.add_argument('--serial', default='/dev/ttyUSB0', 
+    parser.add_argument('--serial', default='/dev/ttyUSB0',
                        help='GPS serial port (default: /dev/ttyUSB0)')
     parser.add_argument('--baudrate', type=int, default=9600,
                        help='GPS baud rate (default: 9600 for Adafruit)')
@@ -759,10 +759,12 @@ if __name__ == '__main__':
                        help='NTP server port (default: 123, requires sudo)')
     parser.add_argument('--web-port', type=int, default=5000,
                        help='Web interface port (default: 5000)')
-    
+
     args = parser.parse_args()
 
     # Create and start server
+    # Declare server as global so Flask routes can access it
+    global server
     server = AdafruitGPSNTP(
         serial_port=args.serial,
         baudrate=args.baudrate,
