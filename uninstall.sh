@@ -1,13 +1,15 @@
 #!/bin/bash
 
 # GPS NTP Server Uninstall Script
-# Removes all files, virtualenv, and systemd service if installed
+# Removes all files, virtualenv, and systemd services if installed
 
 set -e
 
-SERVICE_NAME="gps-ntp-server"
+GPS_SERVICE="gps-ntp-server"
+WEB_SERVICE="gps-ntp-webserver"
 INSTALL_DIR="/opt/gps-ntp-server"
 USER_INSTALL_DIR="$HOME/gps-ntp-server"
+RUNTIME_DIR="/var/run/gps-ntp-server"
 
 echo "================================"
 echo "GPS NTP Server Uninstall Script"
@@ -23,18 +25,29 @@ else
     SYSTEM_MODE=false
 fi
 
-# Stop and disable systemd service if root
+# Stop and disable systemd services if root
 if [ "$SYSTEM_MODE" = true ]; then
-    if systemctl list-units --full -all | grep -q "$SERVICE_NAME.service"; then
-        echo ""
-        echo "Stopping and disabling systemd service..."
-        systemctl stop $SERVICE_NAME 2>/dev/null || true
-        systemctl disable $SERVICE_NAME 2>/dev/null || true
-        systemctl daemon-reload
-        rm -f /etc/systemd/system/$SERVICE_NAME.service
-    else
-        echo "Service not found — skipping systemd cleanup."
+    echo ""
+    echo "Stopping and disabling systemd services..."
+
+    # Stop and disable web server service
+    if systemctl list-units --full -all | grep -q "$WEB_SERVICE.service"; then
+        echo "  Stopping $WEB_SERVICE..."
+        systemctl stop $WEB_SERVICE 2>/dev/null || true
+        systemctl disable $WEB_SERVICE 2>/dev/null || true
+        rm -f /etc/systemd/system/$WEB_SERVICE.service
     fi
+
+    # Stop and disable GPS/NTP server service
+    if systemctl list-units --full -all | grep -q "$GPS_SERVICE.service"; then
+        echo "  Stopping $GPS_SERVICE..."
+        systemctl stop $GPS_SERVICE 2>/dev/null || true
+        systemctl disable $GPS_SERVICE 2>/dev/null || true
+        rm -f /etc/systemd/system/$GPS_SERVICE.service
+    fi
+
+    # Reload systemd
+    systemctl daemon-reload
 fi
 
 # Remove installation directories
@@ -45,6 +58,12 @@ if [ "$SYSTEM_MODE" = true ]; then
         rm -rf "$INSTALL_DIR"
     else
         echo "No system installation found in $INSTALL_DIR"
+    fi
+
+    # Remove runtime directory
+    if [ -d "$RUNTIME_DIR" ]; then
+        echo "Removing runtime directory: $RUNTIME_DIR"
+        rm -rf "$RUNTIME_DIR"
     fi
 else
     if [ -d "$USER_INSTALL_DIR" ]; then
@@ -69,10 +88,21 @@ echo ""
 
 # Check for leftover processes
 echo "Checking for leftover Python processes..."
+FOUND_PROCESSES=false
+
 if pgrep -f "gps_ntp_server.py" > /dev/null; then
     echo "⚠️  Some gps_ntp_server.py processes are still running. Killing them..."
     pkill -f "gps_ntp_server.py" || true
-else
+    FOUND_PROCESSES=true
+fi
+
+if pgrep -f "web_server.py" > /dev/null; then
+    echo "⚠️  Some web_server.py processes are still running. Killing them..."
+    pkill -f "web_server.py" || true
+    FOUND_PROCESSES=true
+fi
+
+if [ "$FOUND_PROCESSES" = false ]; then
     echo "No running processes found."
 fi
 

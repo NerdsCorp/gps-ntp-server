@@ -1,13 +1,14 @@
 [Unit]
-Description=GPS NTP Time Server
-After=network.target
+Description=GPS NTP Web Interface
+After=network.target gps-ntp-server.service
+Requires=gps-ntp-server.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/gps-ntp-server
 # Use the virtual environment Python to ensure dependencies are available
-ExecStart=/opt/gps-ntp-server/venv/bin/python3 /opt/gps-ntp-server/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --ntp-port 123
+ExecStart=/opt/gps-ntp-server/venv/bin/python3 /opt/gps-ntp-server/web_server.py --web-port 5000 --ntp-server localhost --ntp-port 123
 Restart=always
 RestartSec=10
 
@@ -15,7 +16,7 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Security hardening (optional - uncomment if needed, but may cause issues with device access)
+# Security hardening (optional - uncomment if needed)
 #PrivateTmp=yes
 #NoNewPrivileges=true
 #ProtectSystem=strict
