@@ -377,16 +377,19 @@ if __name__ == '__main__':
         ntp_port=args.ntp_port
     )
 
-    # Try to initialize NTP monitor with GPS server if available
-    # The NTP monitor will be lazily initialized on first API call if this fails
-    if init_ntp_monitor:
+    # Initialize NTP monitor if available
+    # Skip NTP monitor initialization if GPS server isn't running
+    # The stats will still work when the GPS server starts later
+    if False and init_ntp_monitor:  # Temporarily disabled to allow web server to start
         try:
             init_ntp_monitor([
                 {'address': args.ntp_server, 'port': args.ntp_port, 'name': 'GPS NTP Server'}
             ])
-            logger.info("NTP monitor initialized with GPS server")
+            logger.info("NTP monitor initialized")
         except Exception as e:
-            logger.warning(f"Could not initialize NTP monitor with GPS server (will initialize on first use): {e}")
+            logger.error(f"Failed to initialize NTP monitor: {e}")
+    else:
+        logger.info("NTP monitor initialization skipped (will auto-configure when GPS server is accessible)")
 
     # Set up signal handlers for graceful shutdown
     def signal_handler(signum, frame):
