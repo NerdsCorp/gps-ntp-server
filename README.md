@@ -1,4 +1,7 @@
 # GPS NTP Server with Web Dashboard
+<img width="1712" height="1269" alt="image" src="https://github.com/user-attachments/assets/2e30e958-ed17-4925-8623-eff3e2732cf6" />
+<img width="1329" height="811" alt="image" src="https://github.com/user-attachments/assets/3b70a1a5-489f-4eae-9e0b-d2542802dc27" />
+
 
 A comprehensive GPS time server solution for the **Adafruit Ultimate GPS GNSS with USB** (99 channel w/10 Hz updates). This application provides:
 
