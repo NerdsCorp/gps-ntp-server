@@ -130,6 +130,7 @@ if [ "$INSTALL_SERVICE" = true ]; then
         # Copy files
         echo "Copying files..."
         cp gps_ntp_server.py $INSTALL_DIR/
+        cp web_server.py $INSTALL_DIR/
         cp requirements.txt $INSTALL_DIR/
         cp README.md $INSTALL_DIR/ 2>/dev/null || true
         cp ntp_statistics.py $INSTALL_DIR/ 2>/dev/null || true
@@ -154,9 +155,11 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Create start script
+# Create start scripts
 echo ""
-echo "Creating start script..."
+echo "Creating start scripts..."
+
+# GPS/NTP server start script
 cat > start_gps_server.sh << 'EOF'
 #!/bin/bash
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -166,12 +169,27 @@ python3 gps_ntp_server.py "$@"
 EOF
 chmod +x start_gps_server.sh
 
-# Install systemd service if running as root
+# Web server start script
+cat > start_web_server.sh << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+source venv/bin/activate
+python3 web_server.py "$@"
+EOF
+chmod +x start_web_server.sh
+
+# Install systemd services if running as root
 if [ "$INSTALL_SERVICE" = true ]; then
     echo ""
-    echo "Installing systemd service..."
-    
-    # Create service file
+    echo "Installing systemd services..."
+
+    # Create runtime directory for status file
+    echo "Creating runtime directory..."
+    mkdir -p /var/run/gps-ntp-server
+    chmod 755 /var/run/gps-ntp-server
+
+    # Create GPS NTP server service file
     cat > /etc/systemd/system/gps-ntp-server.service << EOF
 [Unit]
 Description=GPS NTP Time Server
@@ -181,7 +199,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123
+ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --ntp-port 123
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -190,17 +208,51 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    
-    # Reload systemd and enable service
+
+    # Create web server service file
+    cat > /etc/systemd/system/gps-ntp-webserver.service << EOF
+[Unit]
+Description=GPS NTP Web Interface
+After=network.target gps-ntp-server.service
+Requires=gps-ntp-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/web_server.py --web-port 5000 --ntp-server localhost --ntp-port 123
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Reload systemd and enable services
     systemctl daemon-reload
     systemctl enable gps-ntp-server
-    
+    systemctl enable gps-ntp-webserver
+
     echo ""
-    echo "Service installed! Commands:"
-    echo "  Start:   sudo systemctl start gps-ntp-server"
-    echo "  Stop:    sudo systemctl stop gps-ntp-server"
-    echo "  Status:  sudo systemctl status gps-ntp-server"
-    echo "  Logs:    sudo journalctl -u gps-ntp-server -f"
+    echo "Services installed! Commands:"
+    echo "  GPS/NTP Server:"
+    echo "    Start:   sudo systemctl start gps-ntp-server"
+    echo "    Stop:    sudo systemctl stop gps-ntp-server"
+    echo "    Status:  sudo systemctl status gps-ntp-server"
+    echo "    Logs:    sudo journalctl -u gps-ntp-server -f"
+    echo ""
+    echo "  Web Interface:"
+    echo "    Start:   sudo systemctl start gps-ntp-webserver"
+    echo "    Stop:    sudo systemctl stop gps-ntp-webserver"
+    echo "    Status:  sudo systemctl status gps-ntp-webserver"
+    echo "    Logs:    sudo journalctl -u gps-ntp-webserver -f"
+    echo ""
+    echo "  Both services:"
+    echo "    Start:   sudo systemctl start gps-ntp-server gps-ntp-webserver"
+    echo "    Stop:    sudo systemctl stop gps-ntp-server gps-ntp-webserver"
+    echo "    Restart: sudo systemctl restart gps-ntp-server gps-ntp-webserver"
 fi
 
 # Add user to dialout group for serial port access
@@ -236,23 +288,22 @@ echo "================================"
 echo "Installation Complete!"
 echo "================================"
 echo ""
-echo "To start the server:"
+echo "To start the servers:"
 
 if [ "$INSTALL_SERVICE" = true ]; then
-    echo "  sudo systemctl start gps-ntp-server"
+    echo "  sudo systemctl start gps-ntp-server gps-ntp-webserver"
     echo ""
-    echo "To start manually:"
-    echo "  cd $INSTALL_DIR"
-    echo "  sudo ./start_gps_server.sh"
+    echo "To start services individually:"
+    echo "  GPS/NTP: sudo systemctl start gps-ntp-server"
+    echo "  Web:     sudo systemctl start gps-ntp-webserver"
 else
-    echo "  cd $INSTALL_DIR"
-    echo "  ./start_gps_server.sh"
+    echo "  GPS/NTP Server:"
+    echo "    cd $INSTALL_DIR"
+    echo "    sudo python3 gps_ntp_server.py"
     echo ""
-    echo "For NTP server on port 123 (requires sudo):"
-    echo "  sudo ./start_gps_server.sh"
-    echo ""
-    echo "For testing (higher ports, no sudo):"
-    echo "  ./start_gps_server.sh --ntp-port 8123 --web-port 8080"
+    echo "  Web Interface (in another terminal):"
+    echo "    cd $INSTALL_DIR"
+    echo "    python3 web_server.py"
 fi
 
 echo ""
@@ -264,4 +315,5 @@ echo "  http://localhost:5000/stats/"
 echo ""
 echo "For help and options:"
 echo "  python3 gps_ntp_server.py --help"
+echo "  python3 web_server.py --help"
 echo ""

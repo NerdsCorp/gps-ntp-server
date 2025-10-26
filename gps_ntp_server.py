@@ -14,9 +14,8 @@ import logging
 import signal
 import sys
 import os
+import json
 from datetime import datetime, timezone, timedelta
-from flask import Flask, Response
-from flask_cors import CORS
 
 # Configure logging
 logging.basicConfig(
@@ -25,21 +24,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import ntp_statistics
-try:
-    from ntp_statistics import ntp_stats_bp, init_ntp_monitor
-except ImportError as e:
-    logger.warning(f"NTP statistics module not available: {e}")
-    ntp_stats_bp = None
-    init_ntp_monitor = None
-
-app = Flask(__name__)
-CORS(app)
-
-# Register stats blueprint if available
-if ntp_stats_bp:
-    app.register_blueprint(ntp_stats_bp, url_prefix='/stats')
-    logger.info("Registered NTP statistics blueprint")
+# Status file for sharing with web server
+STATUS_FILE = '/var/run/gps-ntp-server/status.json'
 
 class AdafruitGPSNTP:
     """NTP Server for Adafruit Ultimate GPS"""
@@ -55,10 +41,11 @@ class AdafruitGPSNTP:
     # Request firmware version
     PMTK_Q_RELEASE = b'$PMTK605*31\r\n'
     
-    def __init__(self, serial_port='/dev/ttyUSB0', baudrate=9600, ntp_port=123):
+    def __init__(self, serial_port='/dev/ttyUSB0', baudrate=9600, ntp_port=123, status_file=STATUS_FILE):
         self.serial_port = serial_port
         self.baudrate = baudrate
         self.ntp_port = ntp_port
+        self.status_file = status_file
         self.running = False
         self.gps_time = None
         self.gps_lock = threading.Lock()
@@ -70,6 +57,7 @@ class AdafruitGPSNTP:
         self.firmware_version = "Unknown"
         self.gps_thread = None
         self.ntp_thread = None
+        self.status_thread = None
 
         # Statistics
         self.stats = {
@@ -432,10 +420,11 @@ class AdafruitGPSNTP:
     def start(self):
         """Start GPS and NTP services"""
         self.running = True
-        
+
         logger.info("Starting Adafruit Ultimate GPS NTP Server...")
         logger.info(f"  GPS Port: {self.serial_port} @ {self.baudrate} baud")
         logger.info(f"  NTP Port: {self.ntp_port}")
+        logger.info(f"  Status File: {self.status_file}")
 
         # Start GPS reader thread
         self.gps_thread = threading.Thread(target=self.read_gps, daemon=True)
@@ -447,17 +436,11 @@ class AdafruitGPSNTP:
         # Start NTP server thread
         self.ntp_thread = threading.Thread(target=self.ntp_server, daemon=True)
         self.ntp_thread.start()
-        
-        # Initialize NTP monitor if available
-        if init_ntp_monitor:
-            try:
-                init_ntp_monitor([
-                    {'address': 'localhost', 'port': self.ntp_port, 'name': 'Adafruit GPS NTP'}
-                ])
-                logger.info("NTP monitor initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize NTP monitor: {e}")
-        
+
+        # Start status writer thread
+        self.status_thread = threading.Thread(target=self.status_writer_loop, daemon=True)
+        self.status_thread.start()
+
         logger.info("✅ Server started successfully")
     
     def stop(self):
@@ -473,6 +456,10 @@ class AdafruitGPSNTP:
         if self.ntp_thread and self.ntp_thread.is_alive():
             logger.debug("Waiting for NTP thread to finish...")
             self.ntp_thread.join(timeout=5)
+
+        if self.status_thread and self.status_thread.is_alive():
+            logger.debug("Waiting for status writer thread to finish...")
+            self.status_thread.join(timeout=5)
 
         # Close resources
         if self.serial and self.serial.is_open:
@@ -498,254 +485,36 @@ class AdafruitGPSNTP:
                 'stats': self.stats
             }
 
-@app.route('/')
-def index():
-    """Serve HTML status page"""
-    if 'server' in globals():
-        status = server.get_status()
+    def write_status_file(self):
+        """Write current status to JSON file for web server"""
+        try:
+            status = self.get_status()
 
-        # Determine GPS status color
-        if status['gps_time'] and status['gps_fix_quality'] > 0:
-            gps_status_color = '#28a745'  # green
-            gps_status_text = 'GPS LOCKED'
-        elif status['gps_time']:
-            gps_status_color = '#ffc107'  # yellow
-            gps_status_text = 'GPS ACTIVE'
-        else:
-            gps_status_color = '#dc3545'  # red
-            gps_status_text = 'NO GPS SIGNAL'
+            # Ensure directory exists
+            status_dir = os.path.dirname(self.status_file)
+            if status_dir and not os.path.exists(status_dir):
+                os.makedirs(status_dir, mode=0o755, exist_ok=True)
 
-        # Calculate time since update display
-        time_since_update = status['time_since_update'] if status['time_since_update'] else 0
+            # Write to temporary file first, then rename (atomic operation)
+            temp_file = self.status_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(status, f, indent=2)
+            os.rename(temp_file, self.status_file)
 
-        html = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="5">
-    <title>GPS NTP Server</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: white;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 30px;
-        }}
-        .header h1 {{
-            font-size: 3em;
-            margin: 0;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }}
-        .status-badge {{
-            display: inline-block;
-            padding: 10px 30px;
-            background: {gps_status_color};
-            border-radius: 25px;
-            font-weight: bold;
-            font-size: 1.2em;
-            margin-top: 20px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        }}
-        .cards {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }}
-        .card {{
-            background: white;
-            color: #333;
-            padding: 25px;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }}
-        .card h2 {{
-            margin: 0 0 15px 0;
-            font-size: 1.2em;
-            color: #667eea;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 10px;
-        }}
-        .metric {{
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid #eee;
-        }}
-        .metric:last-child {{
-            border-bottom: none;
-        }}
-        .metric-label {{
-            color: #666;
-            font-weight: 500;
-        }}
-        .metric-value {{
-            font-weight: bold;
-            color: #333;
-        }}
-        .big-number {{
-            font-size: 3em;
-            font-weight: bold;
-            color: #667eea;
-            text-align: center;
-            margin: 20px 0;
-        }}
-        .link-card {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            text-align: center;
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            cursor: pointer;
-            transition: transform 0.3s, box-shadow 0.3s;
-            text-decoration: none;
-            display: block;
-        }}
-        .link-card:hover {{
-            transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
-        }}
-        .link-card h2 {{
-            margin: 0;
-            color: white;
-            border: none;
-        }}
-        .link-card p {{
-            margin: 10px 0 0 0;
-            opacity: 0.9;
-        }}
-        .footer {{
-            text-align: center;
-            margin-top: 30px;
-            opacity: 0.8;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>GPS NTP Server</h1>
-            <div class="status-badge">{gps_status_text}</div>
-        </div>
+            logger.debug(f"Status written to {self.status_file}")
+        except Exception as e:
+            logger.error(f"Error writing status file: {e}")
 
-        <div class="cards">
-            <div class="card">
-                <h2>GPS Status</h2>
-                <div class="metric">
-                    <span class="metric-label">GPS Time:</span>
-                    <span class="metric-value">{status['gps_time'] or 'Waiting...'}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Fix Quality:</span>
-                    <span class="metric-value">{['No fix', 'GPS', 'DGPS', 'PPS', 'RTK', 'RTK float'][status['gps_fix_quality']] if status['gps_fix_quality'] < 6 else 'Unknown'}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Satellites:</span>
-                    <span class="metric-value">{status['satellites']}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Firmware:</span>
-                    <span class="metric-value">{status['firmware']}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Last Update:</span>
-                    <span class="metric-value">{time_since_update:.1f}s ago</span>
-                </div>
-            </div>
+    def status_writer_loop(self):
+        """Periodically write status to file"""
+        while self.running:
+            try:
+                self.write_status_file()
+            except Exception as e:
+                logger.error(f"Error in status writer loop: {e}")
 
-            <div class="card">
-                <h2>NTP Server</h2>
-                <div class="big-number">{status['stats']['ntp_responses']}</div>
-                <div style="text-align: center; color: #666; margin-bottom: 20px;">NTP Responses Sent</div>
-                <div class="metric">
-                    <span class="metric-label">Requests Received:</span>
-                    <span class="metric-value">{status['stats']['ntp_requests']}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Success Rate:</span>
-                    <span class="metric-value">{(status['stats']['ntp_responses'] / status['stats']['ntp_requests'] * 100) if status['stats']['ntp_requests'] > 0 else 0:.1f}%</span>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>GPS Messages</h2>
-                <div class="metric">
-                    <span class="metric-label">Total Messages:</span>
-                    <span class="metric-value">{status['stats']['nmea_total']}</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">RMC (Time):</span>
-                    <span class="metric-value">{status['stats']['rmc_count']} ({status['stats']['rmc_valid']} valid)</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">GGA (Position):</span>
-                    <span class="metric-value">{status['stats']['gga_count']} ({status['stats']['gga_valid']} valid)</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Valid Data Rate:</span>
-                    <span class="metric-value">{(status['stats']['rmc_valid'] / status['stats']['rmc_count'] * 100) if status['stats']['rmc_count'] > 0 else 0:.1f}%</span>
-                </div>
-            </div>
-        </div>
-
-        <a href="/stats/" class="link-card">
-            <h2>View Detailed Statistics Dashboard</h2>
-            <p>Real-time monitoring, charts, and NTP server comparison</p>
-        </a>
-
-        <div class="footer">
-            <p>Page auto-refreshes every 5 seconds</p>
-            <p>Adafruit Ultimate GPS NTP Server | Stratum 1 GPS Time Source</p>
-        </div>
-    </div>
-</body>
-</html>'''
-        return html
-
-    return '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GPS NTP Server</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-        }}
-        h1 {{ font-size: 3em; margin: 0; }}
-        p {{ font-size: 1.2em; opacity: 0.9; }}
-    </style>
-</head>
-<body>
-    <div>
-        <h1>GPS NTP Server</h1>
-        <p>Starting up...</p>
-        <p><a href="/stats/" style="color: white;">View Statistics</a></p>
-    </div>
-</body>
-</html>'''
+            # Write status every 2 seconds
+            time.sleep(2)
 
 if __name__ == '__main__':
     import argparse
@@ -757,18 +526,17 @@ if __name__ == '__main__':
                        help='GPS baud rate (default: 9600 for Adafruit)')
     parser.add_argument('--ntp-port', type=int, default=123,
                        help='NTP server port (default: 123, requires sudo)')
-    parser.add_argument('--web-port', type=int, default=5000,
-                       help='Web interface port (default: 5000)')
+    parser.add_argument('--status-file', default=STATUS_FILE,
+                       help=f'Status file path (default: {STATUS_FILE})')
 
     args = parser.parse_args()
 
     # Create and start server
-    # Declare server as global so Flask routes can access it
-    global server
     server = AdafruitGPSNTP(
         serial_port=args.serial,
         baudrate=args.baudrate,
-        ntp_port=args.ntp_port
+        ntp_port=args.ntp_port,
+        status_file=args.status_file
     )
 
     # Set up signal handlers for graceful shutdown
@@ -784,37 +552,18 @@ if __name__ == '__main__':
 
     try:
         logger.info("=" * 60)
-        logger.info("Starting GPS NTP Server components...")
+        logger.info("Starting GPS NTP Server...")
         logger.info("=" * 60)
 
         server.start()
-        logger.info("✅ GPS and NTP threads started successfully")
-
+        logger.info("✅ GPS and NTP server started successfully")
         logger.info("-" * 60)
-        logger.info(f"🌐 Starting web interface on port {args.web_port}...")
-        logger.info(f"   View status at: http://localhost:{args.web_port}/")
-        logger.info(f"   Statistics at: http://localhost:{args.web_port}/stats/")
-        logger.info(f"   Flask app registered routes: {len(app.url_map._rules)} routes")
+        logger.info("Server is running. Press Ctrl+C to stop.")
         logger.info("-" * 60)
 
-        # Check if port is available
-        import socket as sock_test
-        test_sock = sock_test.socket(sock_test.AF_INET, sock_test.SOCK_STREAM)
-        try:
-            test_sock.bind(('0.0.0.0', args.web_port))
-            test_sock.close()
-            logger.info(f"✅ Port {args.web_port} is available")
-        except OSError as e:
-            logger.error(f"❌ Port {args.web_port} is already in use or unavailable: {e}")
-            raise
-
-        logger.info("🚀 Calling app.run() - web server should start now...")
-
-        # Start Flask web server (blocking call)
-        app.run(host='0.0.0.0', port=args.web_port, debug=False, use_reloader=False)
-
-        # This line should never be reached unless app.run() exits
-        logger.warning("Flask app.run() returned unexpectedly")
+        # Keep the main thread alive
+        while True:
+            time.sleep(1)
 
     except KeyboardInterrupt:
         logger.info("\n🛑 Received KeyboardInterrupt, shutting down...")

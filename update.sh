@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # GPS NTP Server Update Script
-# Updates source code, dependencies, and restarts service if installed
+# Updates source code, dependencies, and restarts services if installed
 
 set -e
 
-SERVICE_NAME="gps-ntp-server"
+GPS_SERVICE="gps-ntp-server"
+WEB_SERVICE="gps-ntp-webserver"
 SYSTEM_DIR="/opt/gps-ntp-server"
 USER_DIR="$HOME/gps-ntp-server"
 
@@ -31,11 +32,19 @@ fi
 
 cd "$INSTALL_DIR"
 
-# Stop running service if system installation
+# Stop running services if system installation
 if [ "$SYSTEM_MODE" = true ]; then
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        echo "🛑 Stopping running service..."
-        systemctl stop "$SERVICE_NAME"
+    echo ""
+    echo "🛑 Stopping running services..."
+
+    if systemctl is-active --quiet "$WEB_SERVICE"; then
+        echo "  Stopping $WEB_SERVICE..."
+        systemctl stop "$WEB_SERVICE"
+    fi
+
+    if systemctl is-active --quiet "$GPS_SERVICE"; then
+        echo "  Stopping $GPS_SERVICE..."
+        systemctl stop "$GPS_SERVICE"
     fi
 fi
 
@@ -91,52 +100,75 @@ else
     pip install -r requirements.txt
 fi
 
-# Update systemd service file if applicable
+# Update systemd service files if applicable
 if [ "$SYSTEM_MODE" = true ]; then
-    # Check if service file exists in repository
+    echo ""
+    echo "🔧 Checking systemd service files..."
+
+    # Update GPS/NTP server service
     if [ -f "gps-ntp-server.service" ]; then
-        echo ""
-        echo "🔧 Checking systemd service file..."
+        INSTALLED_GPS_SERVICE="/etc/systemd/system/$GPS_SERVICE.service"
 
-        # Path to installed service file
-        INSTALLED_SERVICE="/etc/systemd/system/$SERVICE_NAME.service"
-
-        if [ -f "$INSTALLED_SERVICE" ]; then
-            # Compare service files
-            if ! diff -q "gps-ntp-server.service" "$INSTALLED_SERVICE" > /dev/null 2>&1; then
-                echo "📝 Service file has changed, updating..."
-                # Update WorkingDirectory and ExecStart paths in service file
-                sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123|g" \
-                    gps-ntp-server.service > "$INSTALLED_SERVICE"
-                echo "✅ Service file updated"
+        if [ -f "$INSTALLED_GPS_SERVICE" ]; then
+            if ! diff -q "gps-ntp-server.service" "$INSTALLED_GPS_SERVICE" > /dev/null 2>&1; then
+                echo "📝 GPS server service file has changed, updating..."
+                sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --ntp-port 123|g" \
+                    gps-ntp-server.service > "$INSTALLED_GPS_SERVICE"
+                echo "✅ GPS server service file updated"
             else
-                echo "✅ Service file is up to date"
+                echo "✅ GPS server service file is up to date"
             fi
         else
-            echo "⚠️  Service file not found in /etc/systemd/system/"
-            echo "Installing service file..."
-            # Update WorkingDirectory and ExecStart paths in service file
-            sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --web-port 5000 --ntp-port 123|g" \
-                gps-ntp-server.service > "$INSTALLED_SERVICE"
-            systemctl enable "$SERVICE_NAME"
-            echo "✅ Service file installed"
+            echo "⚠️  GPS server service file not found, installing..."
+            sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/gps_ntp_server.py --serial /dev/ttyUSB0 --baudrate 9600 --ntp-port 123|g" \
+                gps-ntp-server.service > "$INSTALLED_GPS_SERVICE"
+            systemctl enable "$GPS_SERVICE"
+            echo "✅ GPS server service file installed"
+        fi
+    fi
+
+    # Update web server service
+    if [ -f "gps-ntp-webserver.service" ]; then
+        INSTALLED_WEB_SERVICE="/etc/systemd/system/$WEB_SERVICE.service"
+
+        if [ -f "$INSTALLED_WEB_SERVICE" ]; then
+            if ! diff -q "gps-ntp-webserver.service" "$INSTALLED_WEB_SERVICE" > /dev/null 2>&1; then
+                echo "📝 Web server service file has changed, updating..."
+                sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/web_server.py --web-port 5000 --ntp-server localhost --ntp-port 123|g" \
+                    gps-ntp-webserver.service > "$INSTALLED_WEB_SERVICE"
+                echo "✅ Web server service file updated"
+            else
+                echo "✅ Web server service file is up to date"
+            fi
+        else
+            echo "⚠️  Web server service file not found, installing..."
+            sed "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|g; s|ExecStart=.*|ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/web_server.py --web-port 5000 --ntp-server localhost --ntp-port 123|g" \
+                gps-ntp-webserver.service > "$INSTALLED_WEB_SERVICE"
+            systemctl enable "$WEB_SERVICE"
+            echo "✅ Web server service file installed"
         fi
     fi
 
     echo ""
-    echo "🚀 Restarting systemd service..."
+    echo "🚀 Restarting systemd services..."
     systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
+    systemctl restart "$GPS_SERVICE"
+    systemctl restart "$WEB_SERVICE"
 
-    # Wait a moment for service to start
+    # Wait a moment for services to start
     sleep 2
 
-    systemctl status "$SERVICE_NAME" --no-pager
+    echo ""
+    echo "Service Status:"
+    systemctl status "$GPS_SERVICE" --no-pager --lines=5
+    echo ""
+    systemctl status "$WEB_SERVICE" --no-pager --lines=5
 else
     echo ""
     echo "✅ Update complete!"
     echo "To restart manually, run:"
-    echo "  cd $INSTALL_DIR && ./start_gps_server.sh"
+    echo "  GPS/NTP Server: cd $INSTALL_DIR && sudo python3 gps_ntp_server.py"
+    echo "  Web Interface:  cd $INSTALL_DIR && python3 web_server.py"
 fi
 
 echo ""
