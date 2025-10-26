@@ -33,7 +33,7 @@ class NTPDatabase:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Use RLock to allow reentrant locking
         self._init_schema()
         logger.info(f"NTP Database initialized at {db_path}")
 
