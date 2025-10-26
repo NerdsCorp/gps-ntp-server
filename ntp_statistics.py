@@ -258,6 +258,18 @@ def init_ntp_monitor(servers=None):
         logger.info(f"NTP Monitor initialized with {len(servers) if servers else 0} servers")
     return ntp_monitor
 
+def get_ntp_monitor():
+    """Get or lazily initialize the NTP monitor
+
+    This function ensures the NTP monitor is initialized on first use,
+    allowing the web server to start without blocking on NTP availability.
+    """
+    global ntp_monitor
+    if not ntp_monitor:
+        logger.info("Lazy initializing NTP monitor with empty server list")
+        init_ntp_monitor([])
+    return ntp_monitor
+
 class NTPClient:
     """NTP Client for querying NTP servers"""
     
@@ -1223,10 +1235,9 @@ def index():
 @ntp_stats_bp.route('/api/ntp/stats')
 def api_ntp_stats():
     """Return NTP statistics as JSON"""
-    if not ntp_monitor:
-        return jsonify({'error': 'NTP monitor not initialized'}), 500
-    
-    comparison = ntp_monitor.get_comparison_data()
+    monitor = get_ntp_monitor()
+
+    comparison = monitor.get_comparison_data()
     
     reachable_servers = [s for s in comparison if s['reachable']]
     
@@ -1237,14 +1248,14 @@ def api_ntp_stats():
         'avg_offset': statistics.mean([s['current_offset'] for s in reachable_servers]) if reachable_servers else None,
         'best_server_name': comparison[0]['name'] if comparison else None,
         'servers': comparison,
-        'aggregated': ntp_monitor.aggregated_stats,
+        'aggregated': monitor.aggregated_stats,
         'history': {}
     }
-    
+
     # Add history for visualization
-    for server_config in ntp_monitor.servers[:5]:  # Limit to 5 servers for performance
+    for server_config in monitor.servers[:5]:  # Limit to 5 servers for performance
         server = server_config['address']
-        history = ntp_monitor.get_server_history(server, 300)  # Last 5 minutes
+        history = monitor.get_server_history(server, 300)  # Last 5 minutes
         if history:
             summary['history'][server] = {
                 'name': server_config['name'],
@@ -1263,8 +1274,7 @@ def api_ntp_stats():
 @ntp_stats_bp.route('/api/ntp/add-server', methods=['POST'])
 def api_add_server():
     """Add a new NTP server to monitor"""
-    if not ntp_monitor:
-        return jsonify({'error': 'NTP monitor not initialized'}), 500
+    monitor = get_ntp_monitor()
 
     data = request.get_json()
     if not data:
@@ -1281,7 +1291,7 @@ def api_add_server():
         return jsonify({'error': 'Port must be between 1 and 65535'}), 400
 
     try:
-        ntp_monitor.add_server(server, port, name)
+        monitor.add_server(server, port, name)
         return jsonify({'success': True, 'message': f'Added server {name}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1289,8 +1299,7 @@ def api_add_server():
 @ntp_stats_bp.route('/api/ntp/remove-server', methods=['POST'])
 def api_remove_server():
     """Remove an NTP server from monitoring"""
-    if not ntp_monitor:
-        return jsonify({'error': 'NTP monitor not initialized'}), 500
+    monitor = get_ntp_monitor()
 
     data = request.get_json()
     if not data:
@@ -1302,7 +1311,7 @@ def api_remove_server():
         return jsonify({'error': 'Server address required'}), 400
 
     try:
-        ntp_monitor.remove_server(server)
+        monitor.remove_server(server)
         return jsonify({'success': True, 'message': f'Removed server {server}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1310,10 +1319,9 @@ def api_remove_server():
 @ntp_stats_bp.route('/api/ntp/export')
 def api_export_stats():
     """Export statistics as CSV"""
-    if not ntp_monitor:
-        return jsonify({'error': 'NTP monitor not initialized'}), 500
-    
-    comparison = ntp_monitor.get_comparison_data()
+    monitor = get_ntp_monitor()
+
+    comparison = monitor.get_comparison_data()
     
     csv_content = "Server,Name,Status,Stratum,Quality Score,Current RTT (ms),Avg RTT (ms),Min RTT (ms),Max RTT (ms),"
     csv_content += "Current Offset (ms),Avg Offset (ms),Offset StdDev (ms),Availability (%),Precision (ms),Reference ID\n"
