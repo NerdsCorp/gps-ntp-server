@@ -79,3 +79,6 @@ logs/
 
 # System files
 Thumbs.db
+
+# Database files
+ntp_stats.db
