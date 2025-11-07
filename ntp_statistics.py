@@ -414,7 +414,6 @@ class NTPMonitor:
     """Monitor multiple NTP servers and collect statistics"""
 
     def __init__(self, servers=None, history_size=3600, db_path='ntp_stats.db'):
-        self.servers = servers or []
         self.history_size = history_size
         self.client = NTPClient()
         self.running = False
@@ -426,23 +425,37 @@ class NTPMonitor:
         # Initialize database
         self.db = NTPDatabase(db_path)
 
-        # Load servers from database if no servers provided
-        if not self.servers:
-            db_servers = self.db.get_all_servers()
-            self.servers = [{
-                'address': s['address'],
-                'port': s['port'],
-                'name': s['name'],
-                'enabled': bool(s['enabled'])
-            } for s in db_servers]
-        else:
-            # Add provided servers to database
-            for server_config in self.servers:
-                self.db.add_server(
-                    server_config['address'],
-                    server_config.get('port', 123),
-                    server_config.get('name')
+        # Always load servers from database first
+        db_servers = self.db.get_all_servers()
+        self.servers = [{
+            'address': s['address'],
+            'port': s['port'],
+            'name': s['name'],
+            'enabled': bool(s['enabled'])
+        } for s in db_servers]
+
+        # Merge in any additional servers provided during initialization
+        if servers:
+            for server_config in servers:
+                # Check if this server already exists in database
+                server_exists = any(
+                    s['address'] == server_config['address'] and
+                    s['port'] == server_config.get('port', 123)
+                    for s in self.servers
                 )
+                if not server_exists:
+                    # Add new server to both list and database
+                    self.servers.append({
+                        'address': server_config['address'],
+                        'port': server_config.get('port', 123),
+                        'name': server_config.get('name', server_config['address']),
+                        'enabled': server_config.get('enabled', True)
+                    })
+                    self.db.add_server(
+                        server_config['address'],
+                        server_config.get('port', 123),
+                        server_config.get('name')
+                    )
 
         # In-memory cache for quick access (still needed for jitter/offset buffers)
         self.metrics = defaultdict(lambda: {
